@@ -1,1 +1,40 @@
-
+name: build-irx
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: ps2dev/ps2dev:latest
+    env:
+      PS2DEV: /usr/local/ps2dev
+      PS2SDK: /usr/local/ps2dev/ps2sdk
+    steps:
+      - uses: actions/checkout@v4
+      - name: Info do SDK (diagnostico)
+        shell: sh
+        run: |
+          mkdir -p out/MODULES
+          { echo "PS2SDK=$PS2SDK"; find $PS2SDK -name "*.irx" | sort; echo; ls $PS2SDK/samples 2>&1; echo; find $PS2SDK -name "ps2ip.h" -o -name "irx_imports.h" -o -name "sockets.h" | sort; } > out/sdk_info.txt 2>&1 || true
+      - name: Compilar
+        shell: sh
+        run: |
+          make -C iop 2>&1 | tee out/build_log.txt
+      - name: Reunir arquivos
+        if: always()
+        shell: sh
+        run: |
+          cp iop/loader/loader.irx out/MODULES/CXTMDM.IRX   || true
+          cp iop/loader/loader.irx out/MODULES/OSTMDM_A.IRX || true
+          for n in AVEPPP AVE_WRAP AVETCP; do cp iop/empty/empty.irx out/MODULES/$n.IRX || true; done
+          cp iop/avewrap/avewrap2.irx out/MODULES/AVEWRAP2.IRX || true
+          cp $PS2SDK/iop/irx/ps2dev9.irx out/MODULES/PS2DEV9.IRX || true
+          cp $PS2SDK/iop/irx/netman.irx  out/MODULES/NETMAN.IRX  || true
+          cp $PS2SDK/iop/irx/smap.irx    out/MODULES/SMAP.IRX    || true
+          if [ -f $PS2SDK/iop/irx/ps2ip-nm.irx ]; then cp $PS2SDK/iop/irx/ps2ip-nm.irx out/MODULES/PS2IP.IRX; else cp $PS2SDK/iop/irx/ps2ip.irx out/MODULES/PS2IP.IRX || true; fi
+          ls -l out/MODULES > out/modules_list.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mvc2-online
+          path: out/
