@@ -1,0 +1,16 @@
+#include "irx_imports.h"
+
+modload_IMPORTS_start
+I_LoadStartModule
+modload_IMPORTS_end
+
+stdio_IMPORTS_start
+I_printf
+stdio_IMPORTS_end
+
+thbase_IMPORTS_start
+I_CreateThread
+I_StartThread
+I_DelayThread
+I_ExitDeleteThread
+thbase_IMPORTS_end
