@@ -194,7 +194,9 @@ static void *rpc_dispatch(int cmd, void *data, int size)
     case 7: {                               /* TcpOpen */
         u32 ip = *(u32 *)(b + 28);
         u16 p1 = *(u16 *)(b + 32), p2 = *(u16 *)(b + 34);
-        u16 port = SERVER_PORT ? SERVER_PORT : (p1 ? p1 : p2);
+        u16 netport = p1 ? p1 : p2;                 /* o jogo passa a porta em ordem de rede (37926 = 9876) */
+        u16 port = (u16)(((netport >> 8) & 0xff) | ((netport & 0xff) << 8));
+        if (SERVER_PORT) port = SERVER_PORT;
         LOG("TcpOpen ip=%08x p1=%u p2=%u -> conectando na porta %u\n", ip, p1, p2, port);
         { int w; for (w = 0; w < 100 && !g_net_ready; w++) DelayThread(100 * 1000); }
         if (!g_net_ready) LOG("TcpOpen: rede sem IP (DHCP falhou)\n");
