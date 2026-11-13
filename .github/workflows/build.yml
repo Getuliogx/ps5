@@ -46,6 +46,7 @@ jobs:
           cp iop/loader/loader.irx out/MODULES/OSTMDM_A.IRX 2>/dev/null || true
           for n in AVEPPP AVE_WRAP AVETCP; do cp iop/empty/empty.irx out/MODULES/$n.IRX 2>/dev/null || true; done
           cp iop/avewrap/avewrap2.irx out/MODULES/AVEWRAP2.IRX 2>/dev/null || true
+          cp iop/usbsrch/usbsrch.irx out/MODULES/USB_SRCH.IRX 2>/dev/null || true
           cp $PS2SDK/iop/irx/ps2dev9.irx out/MODULES/PS2DEV9.IRX 2>/dev/null || true
           cp $PS2SDK/iop/irx/netman.irx  out/MODULES/NETMAN.IRX  2>/dev/null || true
           cp $PS2SDK/iop/irx/smap.irx    out/MODULES/SMAP.IRX    2>/dev/null || true
@@ -61,7 +62,7 @@ jobs:
       - name: FALHAR se nao compilou
         shell: sh
         run: |
-          for f in iop/loader/loader.irx iop/empty/empty.irx iop/avewrap/avewrap2.irx; do
+          for f in iop/loader/loader.irx iop/empty/empty.irx iop/avewrap/avewrap2.irx iop/usbsrch/usbsrch.irx; do
             if [ ! -f "$f" ]; then echo "ERRO: $f nao foi gerado. Veja o log acima."; exit 1; fi
           done
           echo "Todos os modulos compilaram."
