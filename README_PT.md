@@ -40,3 +40,12 @@ Windows: abra o Prompt de Comando e digite `ipconfig`. Anote o "Endereco IPv4" (
 ## Honestidade
 Nada disso foi compilado nem testado em console ainda. Espere iterar: me mande os logs e eu ajusto.
 O protocolo de login/lobby do servidor ainda precisa ser reconstruido a partir do que o jogo enviar.
+
+## Firewall do Windows (se nao aparecer nada no servidor)
+Abra o Prompt de Comando **como administrador** e rode:
+
+    netsh advfirewall firewall add rule name="MVC2 UDP" dir=in action=allow protocol=UDP localport=9999
+    netsh advfirewall firewall add rule name="MVC2 TCP" dir=in action=allow protocol=TCP localport=1000
+
+O PS2 acha o PC sozinho (broadcast na rede local); o IP em config.h so e usado como reserva.
+Nao precisa configurar IP nem DNS no PS2.

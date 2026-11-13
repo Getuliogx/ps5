@@ -51,12 +51,37 @@ def tcp_listener(port, greet):
         c, a = s.accept()
         threading.Thread(target=handle, args=(c, a, port, greet), daemon=True).start()
 
+def local_ips():
+    ips = set()
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80)); ips.add(s.getsockname()[0]); s.close()
+    except Exception:
+        pass
+    try:
+        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+            ips.add(ip)
+    except Exception:
+        pass
+    return sorted(ips)
+
 def udp_logger(port):
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("0.0.0.0", port))
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", port))
     out("escutando logs UDP %d (mensagens do PS2)" % port)
+    last = ""
     while True:
         d, a = s.recvfrom(2048)
-        out("[PS2] " + d.decode("latin-1").rstrip())
+        if d.startswith(b"MVC2-DISCOVER"):
+            s.sendto(b"MVC2-SERVER", a)
+            continue
+        t = d.decode("latin-1").rstrip()
+        if "hb:" in t:
+            if t == last:
+                continue
+            last = t
+        out("[PS2 %s] %s" % (a[0], t))
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
@@ -68,5 +93,6 @@ if __name__ == "__main__":
     for p in a.ports.split(","):
         threading.Thread(target=tcp_listener, args=(int(p), greet), daemon=True).start()
     threading.Thread(target=udp_logger, args=(a.logport,), daemon=True).start()
+    out("IPs deste PC: " + ", ".join(local_ips()))
     out("pronto. Aguardando o PS2... (Ctrl+C para sair)")
     while True: time.sleep(1)

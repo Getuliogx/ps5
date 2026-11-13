@@ -38,13 +38,18 @@ static u8 g_rpcbuf[RPCBUF_SZ] __attribute__((aligned(64)));
 
 /* ---------- log (console do IOP + UDP para o PC) ---------- */
 static int g_logfd = -1;
-static struct sockaddr_in g_logaddr;
+static struct sockaddr_in g_bcast, g_srvlog;
+static u32 g_server_ip = 0;
+static volatile int g_net_ready = 0;
 
 static void logmsg(const char *m)
 {
     printf("%s", m);
-    if (g_logfd >= 0)
-        lwip_sendto(g_logfd, (void *)m, strlen(m), 0, (struct sockaddr *)&g_logaddr, sizeof(g_logaddr));
+    if (g_logfd >= 0) {
+        lwip_sendto(g_logfd, (void *)m, strlen(m), 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
+        g_srvlog.sin_addr.s_addr = g_server_ip;
+        lwip_sendto(g_logfd, (void *)m, strlen(m), 0, (struct sockaddr *)&g_srvlog, sizeof(g_srvlog));
+    }
 }
 #define LOG(...) do { char _m[220]; sprintf(_m, "[avewrap] " __VA_ARGS__); logmsg(_m); } while (0)
 
@@ -189,6 +194,8 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         u16 p1 = *(u16 *)(b + 32), p2 = *(u16 *)(b + 34);
         u16 port = SERVER_PORT ? SERVER_PORT : (p1 ? p1 : p2);
         LOG("TcpOpen ip=%08x p1=%u p2=%u -> conectando na porta %u\n", ip, p1, p2, port);
+        { int w; for (w = 0; w < 100 && !g_net_ready; w++) DelayThread(100 * 1000); }
+        if (!g_net_ready) LOG("TcpOpen: rede sem IP (DHCP falhou)\n");
         *res = do_tcp_open(ip, port);
         LOG("TcpOpen resultado=%d\n", *res);
         break;
@@ -269,8 +276,8 @@ static void *rpc_dispatch(int cmd, void *data, int size)
     case 61: {                              /* DnsLookup */
         int t = *(s16 *)(b + 28);
         if (t < 1 || t > MAXTICKET || !g_ticket_used[t]) { *res = -1; break; }
-        *(u32 *)(b + 32) = IP4(SERVER_IP_A, SERVER_IP_B, SERVER_IP_C, SERVER_IP_D);
-        LOG("DnsLookup ticket %d (%s) -> %d.%d.%d.%d\n", t, g_ticket_name[t], SERVER_IP_A, SERVER_IP_B, SERVER_IP_C, SERVER_IP_D);
+        *(u32 *)(b + 32) = g_server_ip;
+        LOG("DnsLookup ticket %d (%s) -> %d.%d.%d.%d\n", t, g_ticket_name[t], (int)(g_server_ip & 0xff), (int)((g_server_ip >> 8) & 0xff), (int)((g_server_ip >> 16) & 0xff), (int)((g_server_ip >> 24) & 0xff));
         *res = 0;
         break;
     }
@@ -303,46 +310,74 @@ static void *rpc_dispatch(int cmd, void *data, int size)
     return data;
 }
 
-/* ---------- thread principal ---------- */
-static void main_thread(void *arg)
+/* ---------- threads ---------- */
+static void rpc_thread(void *arg)
 {
-    t_ip_info ip;
-    int i, ok = 0;
-
-    for (i = 0; i <= MAXSOCK; i++) g_fd[i] = -1;
-
-    /* DHCP no adaptador Ethernet embutido (sm0) */
-    for (i = 0; i < 40 && !ok; i++) {
-        if (ps2ip_getconfig("sm0", &ip) > 0) {
-            if (!ip.dhcp_enabled) { ip.dhcp_enabled = 1; ps2ip_setconfig(&ip); }
-            if (ip.ipaddr.s_addr != 0) ok = 1;
-        }
-        if (!ok) DelayThread(500 * 1000);
-    }
-    printf("[avewrap] rede %s\n", ok ? "pronta (DHCP)" : "SEM IP (cheque o cabo/roteador)");
-
-    g_logfd = lwip_socket(AF_INET, SOCK_DGRAM, 0);
-    memset(&g_logaddr, 0, sizeof(g_logaddr));
-    g_logaddr.sin_family = AF_INET;
-    g_logaddr.sin_port = HTONS(LOG_PORT);
-    g_logaddr.sin_addr.s_addr = IP4(SERVER_IP_A, SERVER_IP_B, SERVER_IP_C, SERVER_IP_D);
-    LOG("substituto do AVE_WRAP iniciado. servidor=%d.%d.%d.%d\n", SERVER_IP_A, SERVER_IP_B, SERVER_IP_C, SERVER_IP_D);
-
     sceSifInitRpc(0);
     sceSifSetRpcQueue(&g_qd, GetThreadId());
     sceSifRegisterRpc(&g_sd, AVE_RPC_ID, rpc_dispatch, g_rpcbuf, NULL, NULL, &g_qd);
     sceSifRpcLoop(&g_qd);
 }
 
+/* DHCP + log/heartbeat por UDP + descoberta automatica do servidor no PC */
+static void net_thread(void *arg)
+{
+    t_ip_info ip;
+    int i, n, on = 1, found = 0;
+    char msg[200];
+    struct sockaddr_in from;
+    socklen_t fromlen;
+    u8 rb[64];
+
+    memset(&ip, 0, sizeof(ip));
+    for (i = 0; i < 120 && !g_net_ready; i++) {          /* ate ~60 s para o DHCP */
+        if (ps2ip_getconfig("sm0", &ip) > 0) {
+            if (!ip.dhcp_enabled) { ip.dhcp_enabled = 1; ps2ip_setconfig(&ip); }
+            if (ip.ipaddr.s_addr != 0) g_net_ready = 1;
+        }
+        if (!g_net_ready) DelayThread(500 * 1000);
+    }
+
+    g_logfd = lwip_socket(AF_INET, SOCK_DGRAM, 0);
+    lwip_setsockopt(g_logfd, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on));
+    set_nonblock(g_logfd);
+
+    for (;;) {
+        u32 a = 0;
+        if (ps2ip_getconfig("sm0", &ip) > 0) a = ip.ipaddr.s_addr;
+        sprintf(msg, "[avewrap] hb: ps2_ip=%d.%d.%d.%d dhcp=%d servidor=%d.%d.%d.%d %s\n",
+                (int)(a & 0xff), (int)((a >> 8) & 0xff), (int)((a >> 16) & 0xff), (int)((a >> 24) & 0xff),
+                (int)g_net_ready,
+                (int)(g_server_ip & 0xff), (int)((g_server_ip >> 8) & 0xff), (int)((g_server_ip >> 16) & 0xff), (int)((g_server_ip >> 24) & 0xff),
+                found ? "(descoberto)" : "(config.h)");
+        logmsg(msg);
+        lwip_sendto(g_logfd, (void *)"MVC2-DISCOVER", 13, 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
+        fromlen = sizeof(from);
+        n = lwip_recvfrom(g_logfd, rb, sizeof(rb) - 1, 0, (struct sockaddr *)&from, &fromlen);
+        if (n >= 11 && memcmp(rb, "MVC2-SERVER", 11) == 0) { g_server_ip = from.sin_addr.s_addr; found = 1; }
+        DelayThread(2000 * 1000);
+    }
+}
+
 int _start(int argc, char *argv[])
 {
     iop_thread_t th;
-    int tid;
+    int tid, i;
 
-    th.attr = TH_C; th.option = 0; th.thread = main_thread;
-    th.stacksize = 0x4000; th.priority = 0x28;
+    for (i = 0; i <= MAXSOCK; i++) g_fd[i] = -1;
+    g_server_ip = IP4(SERVER_IP_A, SERVER_IP_B, SERVER_IP_C, SERVER_IP_D);
+    memset(&g_bcast, 0, sizeof(g_bcast));
+    g_bcast.sin_family = AF_INET; g_bcast.sin_port = HTONS(LOG_PORT); g_bcast.sin_addr.s_addr = IP4(255, 255, 255, 255);
+    memset(&g_srvlog, 0, sizeof(g_srvlog));
+    g_srvlog.sin_family = AF_INET; g_srvlog.sin_port = HTONS(LOG_PORT);
+
+    th.attr = TH_C; th.option = 0; th.thread = rpc_thread; th.stacksize = 0x4000; th.priority = 0x28;
     tid = CreateThread(&th);
     if (tid <= 0) return MODULE_NO_RESIDENT_END;
     StartThread(tid, NULL);
+
+    th.thread = net_thread; th.priority = 0x30;
+    tid = CreateThread(&th);
+    if (tid > 0) StartThread(tid, NULL);
     return MODULE_RESIDENT_END;
 }
