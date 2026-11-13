@@ -114,8 +114,8 @@ static void do_tcp_close(int h)
 /* Quantos bytes estao prontos para ler (espia o socket sem consumir). */
 static int sock_peek(int fd)
 {
-    u8 tmp[1];
-    int n = lwip_recv(fd, tmp, 1, 0x02 /* MSG_PEEK */);
+    u8 tmp[512];
+    int n = lwip_recv(fd, tmp, sizeof(tmp), 0x02 /* MSG_PEEK */);
     return (n > 0) ? n : 0;
 }
 
@@ -210,8 +210,9 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         int h = *(s16 *)(b + 28), fd = sock_of(h);
         memset(b + 28, 0, 16);
         if (fd < 0) { *res = -1; break; }
-        *(s16 *)(b + 28) = 4;               /* ESTABLISHED */
-        *(u16 *)(b + 34) = (u16)sock_peek(fd);
+        *(u16 *)(b + 30) = 4;               /* estado: ESTABLISHED */
+        *(u16 *)(b + 36) = (u16)sock_peek(fd); /* bytes disponiveis */
+        *res = 0;
         break;
     }
     case 15: {                              /* TcpSend */
@@ -284,7 +285,7 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         if (t < 1 || t > MAXTICKET || !g_ticket_used[t]) { *res = -1; break; }
         *(u32 *)(b + 32) = g_server_ip;
         LOG("DnsLookup ticket %d (%s) -> %d.%d.%d.%d\n", t, g_ticket_name[t], (int)(g_server_ip & 0xff), (int)((g_server_ip >> 8) & 0xff), (int)((g_server_ip >> 16) & 0xff), (int)((g_server_ip >> 24) & 0xff));
-        *res = 0;
+        *res = 1;                            /* 1 = pronto (0 o jogo trata como erro) */
         break;
     }
 
