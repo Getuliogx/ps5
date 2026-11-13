@@ -23,7 +23,10 @@ jobs:
         continue-on-error: true
         shell: sh
         run: |
-          make -C iop > out/build_log.txt 2>&1 && echo "COMPILOU OK" >> out/build_log.txt
+          apk add --no-cache make bash git build-base > out/apk_log.txt 2>&1 || true
+          export PATH=$PATH:$PS2DEV/bin:$PS2DEV/ee/bin:$PS2DEV/iop/bin:$PS2DEV/dvp/bin:$PS2SDK/bin
+          { which make; which mipsel-ps2-irx-gcc; echo "PATH=$PATH"; } > out/build_log.txt 2>&1 || true
+          make -C iop >> out/build_log.txt 2>&1 && echo "COMPILOU OK" >> out/build_log.txt
 
       - name: MOSTRAR LOG DE COMPILACAO
         if: always()
@@ -32,7 +35,8 @@ jobs:
           echo "=============== build_log.txt ==============="
           cat out/build_log.txt
           echo "=============== sdk_info.txt (parcial) ==============="
-          head -60 out/sdk_info.txt
+          grep -v "\.irx$" out/sdk_info.txt
+          grep -E "ps2dev9|netman|smap|ps2ip|ps2smap" out/sdk_info.txt || true
 
       - name: Reunir arquivos
         if: always()
