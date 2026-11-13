@@ -10,6 +10,10 @@ I_memset
 I_memmove
 I_strcmp
 I_strlen
+I_strcpy
+I_strncpy
+I_strcat
+I_memcmp
 I_sprintf
 sysclib_IMPORTS_end
 

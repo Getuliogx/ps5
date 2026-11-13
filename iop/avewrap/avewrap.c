@@ -289,7 +289,7 @@ static void *rpc_dispatch(int cmd, void *data, int size)
     case 67:
         do_mcs_receive(b, res);
         if (*res > 0) {
-            char hex[200]; int i, n = *res > 48 ? 48 : *res;
+            char hex[100]; int i, n = *res > 40 ? 40 : *res;
             for (i = 0; i < n; i++) sprintf(hex + i * 2, "%02x", b[32 + i]);
             LOG("McsReceive %d bytes: %s\n", *res, hex);
         }
