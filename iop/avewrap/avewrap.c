@@ -315,7 +315,7 @@ static void main_thread(void *arg)
     for (i = 0; i < 40 && !ok; i++) {
         if (ps2ip_getconfig("sm0", &ip) > 0) {
             if (!ip.dhcp_enabled) { ip.dhcp_enabled = 1; ps2ip_setconfig(&ip); }
-            if (ip.ipaddr.addr != 0) ok = 1;
+            if (ip.ipaddr.s_addr != 0) ok = 1;
         }
         if (!ok) DelayThread(500 * 1000);
     }
