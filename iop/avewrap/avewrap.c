@@ -247,15 +247,16 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         int st = 0;
         memset(b + 28, 0, 48);
         if (g_ppp_on) { st = (g_ppp_polls < 3) ? g_ppp_polls + 1 : 4; g_ppp_polls++; }
-        *(s16 *)(b + 64) = (s16)st;          /* status que o jogo le (4 = conectado) */
+        *(s16 *)(b + 36) = (s16)st;          /* status que o jogo le em 0x42b1f0 (4 = conectado) */
+        *(s16 *)(b + 64) = (s16)st;          /* variante em 0x42ac60 */
         if (st != last) { LOG("PppStatus -> %d\n", st); last = st; }
         *res = 0;
         break;
     }
     case 36:                                /* PppGetUsbDeviceId */
-        LOG("PppGetUsbDeviceId\n");
+        LOG("PppGetUsbDeviceId -> 1 (modem presente)\n");
         *(u32 *)(b + 28) = 0x05720000 | 0x1272;
-        *res = 0;
+        *res = 1;                            /* != 0: senao o jogo marca "modem ausente" */
         break;
     case 37:                                /* PppSetOption */
         *res = 0;
