@@ -41,12 +41,14 @@ static int g_logfd = -1;
 static struct sockaddr_in g_bcast, g_srvlog;
 static u32 g_server_ip = 0;
 static volatile int g_net_ready = 0;
+static volatile int g_found = 0;
 
 static void logmsg(const char *m)
 {
     printf("%s", m);
     if (g_logfd >= 0) {
-        lwip_sendto(g_logfd, (void *)m, strlen(m), 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
+        if (!g_found)
+            lwip_sendto(g_logfd, (void *)m, strlen(m), 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
         g_srvlog.sin_addr.s_addr = g_server_ip;
         lwip_sendto(g_logfd, (void *)m, strlen(m), 0, (struct sockaddr *)&g_srvlog, sizeof(g_srvlog));
     }
@@ -241,15 +243,18 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         *res = 0;
         break;
     case 35: {                              /* PppStatus */
+        static int last = -1;
         int st = 0;
-        memset(b + 28, 0, 40);
+        memset(b + 28, 0, 48);
         if (g_ppp_on) { st = (g_ppp_polls < 3) ? g_ppp_polls + 1 : 4; g_ppp_polls++; }
-        *(s16 *)(b + 36) = (s16)st;
+        *(s16 *)(b + 64) = (s16)st;          /* status que o jogo le (4 = conectado) */
+        if (st != last) { LOG("PppStatus -> %d\n", st); last = st; }
         *res = 0;
         break;
     }
     case 36:                                /* PppGetUsbDeviceId */
-        *(u32 *)(b + 28) = 0x05DB0006;
+        LOG("PppGetUsbDeviceId\n");
+        *(u32 *)(b + 28) = 0x05720000 | 0x1272;
         *res = 0;
         break;
     case 37:                                /* PppSetOption */
@@ -354,7 +359,7 @@ static void net_thread(void *arg)
         lwip_sendto(g_logfd, (void *)"MVC2-DISCOVER", 13, 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
         fromlen = sizeof(from);
         n = lwip_recvfrom(g_logfd, rb, sizeof(rb) - 1, 0, (struct sockaddr *)&from, &fromlen);
-        if (n >= 11 && memcmp(rb, "MVC2-SERVER", 11) == 0) { g_server_ip = from.sin_addr.s_addr; found = 1; }
+        if (n >= 11 && memcmp(rb, "MVC2-SERVER", 11) == 0) { g_server_ip = from.sin_addr.s_addr; found = 1; g_found = 1; }
         DelayThread(2000 * 1000);
     }
 }
