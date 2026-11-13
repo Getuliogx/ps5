@@ -20,7 +20,7 @@ Windows: abra o Prompt de Comando e digite `ipconfig`. Anote o "Endereco IPv4" (
 ## 3. Colocar na ISO (UltraISO)
 1. Abra a ISO, entre na pasta `MODULES`.
 2. Arraste TODOS os arquivos da pasta `MODULES` do artifact para dentro da `MODULES` da ISO,
-   aceitando substituir os que ja existem (CXTMDM, OSTMDM_A, AVEPPP, AVE_WRAP, AVETCP) e adicionando
+   aceitando substituir os que ja existem (CXTMDM, OSTMDM_A, AVEPPP, AVE_WRAP, AVETCP, USB_SRCH) e adicionando
    os novos (PS2DEV9, NETMAN, SMAP, PS2IP, AVEWRAP2).
 3. Salve a ISO (Arquivo > Salvar).
 
