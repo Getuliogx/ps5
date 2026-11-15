@@ -42,6 +42,7 @@ static struct sockaddr_in g_bcast, g_srvlog;
 static u32 g_server_ip = 0;
 static volatile int g_net_ready = 0;
 static volatile int g_found = 0;
+static volatile u32 g_cnt[80];
 
 static void logmsg(const char *m)
 {
@@ -114,8 +115,8 @@ static void do_tcp_close(int h)
 /* Quantos bytes estao prontos para ler (espia o socket sem consumir). */
 static int sock_peek(int fd)
 {
-    u8 tmp[512];
-    int n = lwip_recv(fd, tmp, sizeof(tmp), 0x02 /* MSG_PEEK */);
+    int n = 0;
+    if (lwip_ioctl(fd, FIONREAD, &n) < 0) return 0;
     return (n > 0) ? n : 0;
 }
 
@@ -137,9 +138,10 @@ static void do_mcs_receive(u8 *b, s32 *res)
     if (fd < 0) { *res = -6; return; }
 
     if (g_mcs_len < (int)sizeof(g_mcs_buf)) {
-        int n = lwip_recv(fd, g_mcs_buf + g_mcs_len, sizeof(g_mcs_buf) - g_mcs_len, 0);
-        if (n > 0) g_mcs_len += n;
-        else if (n == 0 && g_mcs_len == 0) { *res = -6; return; } /* conexao fechada */
+        if (sock_peek(fd) > 0) {
+            int n = lwip_recv(fd, g_mcs_buf + g_mcs_len, sizeof(g_mcs_buf) - g_mcs_len, 0);
+            if (n > 0) g_mcs_len += n;
+        }
     }
     if (g_mcs_len == 0) { *res = 0; return; }
 
@@ -180,6 +182,7 @@ static void *rpc_dispatch(int cmd, void *data, int size)
     u8 *b = (u8 *)data;
     s32 *res = (s32 *)(b + 24);
     *res = 0;
+    if (cmd >= 0 && cmd < 80) g_cnt[cmd]++;
 
     switch (cmd) {
     case 3: case 4:                         /* SetOpt / GetOpt */
@@ -209,11 +212,18 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         do_tcp_close(*(s16 *)(b + 28));
         break;
     case 14: {                              /* TcpStat */
-        int h = *(s16 *)(b + 28), fd = sock_of(h);
+        static int stat_n = 0;
+        int h = *(s16 *)(b + 28), fd = sock_of(h), av;
         memset(b + 28, 0, 16);
-        if (fd < 0) { *res = -1; break; }
+        if (fd < 0) {
+            if (stat_n < 8) { LOG("TcpStat h=%d INVALIDO (fd=%d)\n", h, fd); stat_n++; }
+            *res = -1;
+            break;
+        }
+        av = sock_peek(fd);
         *(u16 *)(b + 30) = 4;               /* estado: ESTABLISHED */
-        *(u16 *)(b + 36) = (u16)sock_peek(fd); /* bytes disponiveis */
+        *(u16 *)(b + 36) = (u16)av;         /* bytes disponiveis */
+        if (stat_n < 8) { LOG("TcpStat h=%d -> estado=4 disponiveis=%d\n", h, av); stat_n++; }
         *res = 0;
         break;
     }
@@ -229,7 +239,7 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         int h = *(s16 *)(b + 28), max = *(s16 *)(b + 30), fd = sock_of(h), n;
         if (fd < 0) { *res = -1; break; }
         if (max > 986) max = 986;
-        n = lwip_recv(fd, b + 32, max, 0);
+        n = (sock_peek(fd) > 0) ? lwip_recv(fd, b + 32, max, 0) : 0;
         *res = (n > 0) ? n : 0;
         if (n > 0) LOG("TcpRecv h=%d -> %d bytes\n", h, n);
         break;
@@ -257,7 +267,6 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         break;
     }
     case 36:                                /* PppGetUsbDeviceId */
-        LOG("PppGetUsbDeviceId -> 1 (modem presente)\n");
         *(u32 *)(b + 28) = 0x05720000 | 0x1272;
         *res = 1;                            /* != 0: senao o jogo marca "modem ausente" */
         break;
@@ -359,6 +368,10 @@ static void net_thread(void *arg)
                 (int)g_net_ready,
                 (int)(g_server_ip & 0xff), (int)((g_server_ip >> 8) & 0xff), (int)((g_server_ip >> 16) & 0xff), (int)((g_server_ip >> 24) & 0xff),
                 found ? "(descoberto)" : "(config.h)");
+        logmsg(msg);
+        sprintf(msg, "[avewrap] cnt: open=%d stat=%d send=%d recv=%d mcsInit=%d mcsRecv=%d pppSt=%d usbId=%d dns=%d outros=%d\n",
+                (int)g_cnt[7], (int)g_cnt[14], (int)g_cnt[15], (int)g_cnt[18], (int)g_cnt[64], (int)g_cnt[67],
+                (int)g_cnt[35], (int)g_cnt[36], (int)g_cnt[61], (int)(g_cnt[3] + g_cnt[4] + g_cnt[11] + g_cnt[65]));
         logmsg(msg);
         lwip_sendto(g_logfd, (void *)"MVC2-DISCOVER", 13, 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
         fromlen = sizeof(from);
