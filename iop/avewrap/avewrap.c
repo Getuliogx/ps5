@@ -58,6 +58,9 @@ static void logmsg(const char *m)
 
 /* ---------- estado ---------- */
 static int g_fd[MAXSOCK + 1];
+static u8 g_rx[MAXSOCK + 1][1024];
+static int g_rxlen[MAXSOCK + 1];
+static int g_rxclosed[MAXSOCK + 1];
 static char g_ticket_name[MAXTICKET + 1][64];
 static int g_ticket_used[MAXTICKET + 1];
 static int g_ppp_on = 0, g_ppp_polls = 0;
@@ -100,6 +103,8 @@ static int do_tcp_open(u32 ip, u16 port)
     }
     set_nonblock(fd);
     g_fd[h] = fd;
+    g_rxlen[h] = 0;
+    g_rxclosed[h] = 0;
     return h;
 }
 
@@ -109,15 +114,33 @@ static void do_tcp_close(int h)
     if (fd >= 0) {
         lwip_close(fd);
         g_fd[h] = -1;
+        g_rxlen[h] = 0;
+        g_rxclosed[h] = 0;
     }
 }
 
 /* Quantos bytes estao prontos para ler (espia o socket sem consumir). */
-static int sock_peek(int fd)
+/* Le (sem bloquear) o que ja chegou e guarda no buffer do handle; assim sabemos quantos bytes ha sem consumi-los. */
+static void rx_fill(int h)
 {
-    int n = 0;
-    if (lwip_ioctl(fd, FIONREAD, &n) < 0) return 0;
-    return (n > 0) ? n : 0;
+    int fd = sock_of(h), n;
+    if (fd < 0 || g_rxlen[h] >= (int)sizeof(g_rx[h])) return;
+    n = lwip_recv(fd, g_rx[h] + g_rxlen[h], sizeof(g_rx[h]) - g_rxlen[h], 0x08 /* MSG_DONTWAIT */);
+    if (n > 0) g_rxlen[h] += n;
+    else if (n == 0) g_rxclosed[h] = 1;
+}
+
+static int rx_take(int h, u8 *dst, int max)
+{
+    int n;
+    rx_fill(h);
+    n = (g_rxlen[h] < max) ? g_rxlen[h] : max;
+    if (n > 0) {
+        memcpy(dst, g_rx[h], n);
+        g_rxlen[h] -= n;
+        if (g_rxlen[h] > 0) memmove(g_rx[h], g_rx[h] + n, g_rxlen[h]);
+    }
+    return n;
 }
 
 /* ---------- Mcs: mensagens da Capcom sobre o TCP ----------
@@ -138,8 +161,8 @@ static void do_mcs_receive(u8 *b, s32 *res)
     if (fd < 0) { *res = -6; return; }
 
     if (g_mcs_len < (int)sizeof(g_mcs_buf)) {
-        if (sock_peek(fd) > 0) {
-            int n = lwip_recv(fd, g_mcs_buf + g_mcs_len, sizeof(g_mcs_buf) - g_mcs_len, 0);
+        {
+            int n = rx_take(g_mcs_handle, g_mcs_buf + g_mcs_len, sizeof(g_mcs_buf) - g_mcs_len);
             if (n > 0) g_mcs_len += n;
         }
     }
@@ -212,7 +235,7 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         do_tcp_close(*(s16 *)(b + 28));
         break;
     case 14: {                              /* TcpStat */
-        static int stat_n = 0;
+        static int stat_n = 0, last_av = -1;
         int h = *(s16 *)(b + 28), fd = sock_of(h), av;
         memset(b + 28, 0, 16);
         if (fd < 0) {
@@ -220,10 +243,11 @@ static void *rpc_dispatch(int cmd, void *data, int size)
             *res = -1;
             break;
         }
-        av = sock_peek(fd);
+        rx_fill(h);
+        av = g_rxlen[h];
         *(u16 *)(b + 30) = 4;               /* estado: ESTABLISHED */
         *(u16 *)(b + 36) = (u16)av;         /* bytes disponiveis */
-        if (stat_n < 8) { LOG("TcpStat h=%d -> estado=4 disponiveis=%d\n", h, av); stat_n++; }
+        if (av != last_av) { LOG("TcpStat h=%d -> estado=4 disponiveis=%d\n", h, av); last_av = av; }
         *res = 0;
         break;
     }
@@ -239,9 +263,13 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         int h = *(s16 *)(b + 28), max = *(s16 *)(b + 30), fd = sock_of(h), n;
         if (fd < 0) { *res = -1; break; }
         if (max > 986) max = 986;
-        n = (sock_peek(fd) > 0) ? lwip_recv(fd, b + 32, max, 0) : 0;
+        n = rx_take(h, b + 32, max);
         *res = (n > 0) ? n : 0;
-        if (n > 0) LOG("TcpRecv h=%d -> %d bytes\n", h, n);
+        if (n > 0) {
+            char hex[100]; int i, k = n > 24 ? 24 : n;
+            for (i = 0; i < k; i++) sprintf(hex + i * 2, "%02x", b[32 + i]);
+            LOG("TcpRecv h=%d pediu %d -> %d bytes: %s\n", h, max, n, hex);
+        }
         break;
     }
 
