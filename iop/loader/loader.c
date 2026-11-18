@@ -1,4 +1,4 @@
-/* Substitui CXTMDM.IRX / OSTMDM_A.IRX: em vez de driver de modem,
+/* Substitui CXTMDM.IRX / OSTMDM_A.IRX / OMMODEM.IRX (CvS2): em vez de driver de modem,
    carrega a pilha de rede Ethernet e o substituto do AVE_WRAP. */
 #include "irx_imports.h"
 

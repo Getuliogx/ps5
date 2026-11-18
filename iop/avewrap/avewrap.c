@@ -1,23 +1,25 @@
 /*
- * avewrap.c - substituto do AVE_WRAP.IRX de "Marvel vs. Capcom 2 - New Age of Heroes" (PS2, Japao)
+ * avewrap.c - substituto do AVE_WRAP.IRX ("Tcp wrapper 2001.07.12") de
+ * "Capcom vs. SNK 2 Millionaire Fighting 2001" (PS2, Japao, SLPM-65047).
  *
- * O jogo (EE) fala com este modulo por RPC (ID 0x01270030). Os formatos abaixo foram
- * obtidos por engenharia reversa dos stubs do ELF (SLPM_622.27) e do AVE_WRAP.IRX original:
+ * A tabela de comandos abaixo vem do proprio AVE_WRAP.IRX original do disco (enum AVE_WRAP_FUNCTION_ID,
+ * presente na informacao de debug) e foi conferida contra os stubs do ELF do jogo (0x3400a0..0x340f30).
+ * ATENCAO: nao e a mesma numeracao do MvC2! No CvS2 a familia DNS e 56..62 (no MvC2 era 57..61) e NAO existe Mcs.
  *
  *   buffer RPC:  +24 = resultado (s32)   +28... = argumentos / dados de retorno
  *
- *   cmd  3 SetOpt          cmd  4 GetOpt          cmd  5 TcpInitialize   cmd  6 TcpDisp
- *   cmd  7 TcpOpen   (+28 u32 ip, +32 u16 porta, +34 u16 arg2)  -> res = handle
- *   cmd 11 TcpClose  (+28 s16 handle)
- *   cmd 14 TcpStat   (+28 s16 handle)  -> +28 s16 estado(4=ESTABLISHED), +30 u16, +34 u16 bytes disp., +36 u16
- *   cmd 15 TcpSend   (+28 s16 handle, +30 s16 len, +32 dados)  -> res = enviados
- *   cmd 18 TcpRecv   (+28 s16 handle, +30 s16 max)             -> res = len, dados em +32
- *   cmd 31/32/33/34/37 Ppp*  (nao ha modem: respondem sucesso)
- *   cmd 35 PppStatus -> +36 s16 status (0..3 discando, 4 = CONECTADO, 5/8 = erro)
- *   cmd 36 PppGetUsbDeviceId -> res=0, +28 u32 id
- *   cmd 57 DnsInit  58 DnsDisp  59 DnsGetTicket(+28 nome)  60 DnsReleaseTicket(+28 s16)
- *   cmd 61 DnsLookup (+28 s16 ticket) -> res=0, +32 u32 ip
- *   cmd 64 McsInitialize (+0 s32 handle)  65 McsDispose  67 McsReceive (+30 s16 max) -> res=len, dados +32
+ *   cmd  0 Getconfig  1 Ifconfig  2 Ifdown  3 SetOpt  4 GetOpt
+ *   cmd  5 TcpInit    6 TcpTerm
+ *   cmd  7 TcpOpen   (+28 u32 ip, +32 u16 porta destino (ordem de rede), +34 u16 porta origem) -> res = handle
+ *   cmd 11 TcpClose  (+28 s16 h)         12 TcpAbort
+ *   cmd 14 TcpStat   (+28 s16 h) -> +30 estado (4=ESTABLISHED), +34 janela de envio, +36 BYTES DISPONIVEIS p/ leitura
+ *   cmd 15 TcpSend   (+28 s16 h, +30 s16 len, +32 dados) -> res = enviados
+ *   cmd 18 TcpRecv   (+28 s16 h, +30 s16 max)            -> res = len, dados em +32
+ *   cmd 31 PppInit 32 PppDisp 33 PppStart 34 PppFinish 35 PppStatus 36 PppUsbDeviceId 37/38 PppOption
+ *   cmd 35 PppStatus -> res = fase (0..9; 4 = CONECTADO) E +36 u16 fase (+46 u16 last_error = 0)
+ *   cmd 56 DnsInit  57 DnsDisp  58 DnsGetTicket(+28 nome, res = ticket)  59 DnsReleaseTicket(+28 s16)
+ *   cmd 60 DnsLookup (+28 s16 ticket) -> res = 1 (pronto) e +32 u32 ip   (res 0 = o jogo trata como erro)
+ *   cmd 63..77 Com*  (nao usados por este modulo: respondem 0)
  */
 #include "irx_imports.h"
 #include "config.h"
@@ -28,6 +30,7 @@ IRX_ID("Capcom_AVE_TCP_Wrapper", 1, 1);
 #define RPCBUF_SZ  2048
 #define MAXSOCK    8
 #define MAXTICKET  8
+#define RXSZ       2048
 
 #define IP4(a, b, c, d) ((u32)(a) | ((u32)(b) << 8) | ((u32)(c) << 16) | ((u32)(d) << 24))
 #define HTONS(x)        ((u16)((((x) & 0xff) << 8) | (((x) >> 8) & 0xff)))
@@ -58,16 +61,12 @@ static void logmsg(const char *m)
 
 /* ---------- estado ---------- */
 static int g_fd[MAXSOCK + 1];
-static u8 g_rx[MAXSOCK + 1][1024];
+static u8 g_rx[MAXSOCK + 1][RXSZ];
 static int g_rxlen[MAXSOCK + 1];
 static int g_rxclosed[MAXSOCK + 1];
 static char g_ticket_name[MAXTICKET + 1][64];
 static int g_ticket_used[MAXTICKET + 1];
 static int g_ppp_on = 0, g_ppp_polls = 0;
-
-static u8 g_mcs_buf[1024];
-static int g_mcs_len = 0;
-static int g_mcs_handle = -1;
 
 static int sock_of(int h)
 {
@@ -119,13 +118,13 @@ static void do_tcp_close(int h)
     }
 }
 
-/* Quantos bytes estao prontos para ler (espia o socket sem consumir). */
-/* Le (sem bloquear) o que ja chegou e guarda no buffer do handle; assim sabemos quantos bytes ha sem consumi-los. */
+/* FIONREAD nao funciona neste lwIP: cada handle tem buffer proprio; o TcpStat informa o tamanho dele
+   e o TcpRecv consome dele (o jogo so le quando ha >= 12 bytes para o cabecalho). */
 static void rx_fill(int h)
 {
     int fd = sock_of(h), n;
-    if (fd < 0 || g_rxlen[h] >= (int)sizeof(g_rx[h])) return;
-    n = lwip_recv(fd, g_rx[h] + g_rxlen[h], sizeof(g_rx[h]) - g_rxlen[h], 0x08 /* MSG_DONTWAIT */);
+    if (fd < 0 || g_rxlen[h] >= RXSZ) return;
+    n = lwip_recv(fd, g_rx[h] + g_rxlen[h], RXSZ - g_rxlen[h], 0x08 /* MSG_DONTWAIT */);
     if (n > 0) g_rxlen[h] += n;
     else if (n == 0) g_rxclosed[h] = 1;
 }
@@ -143,62 +142,6 @@ static int rx_take(int h, u8 *dst, int max)
     return n;
 }
 
-/* ---------- Mcs: mensagens da Capcom sobre o TCP ----------
- * Reproduz _McsReceive do AVE_WRAP original:
- *  - registro cujo 1o byte != 0x28: o 1o byte e o tamanho total do registro, copiado inteiro;
- *  - registro que comeca com 0x28: cabecalho de 12 bytes, tamanho de 16 bits big-endian em +4;
- *    sai como [len+14][0x60][12+len bytes] (o original avanca so 14 na saida; mantido).
- */
-static void do_mcs_receive(u8 *b, s32 *res)
-{
-    int maxlen = *(s16 *)(b + 30);
-    u8 *out = b + 32;
-    int fd = sock_of(g_mcs_handle);
-    int pos = 0, o = 0;
-
-    if (maxlen > 986) maxlen = 986;
-    *res = -16;
-    if (fd < 0) { *res = -6; return; }
-
-    if (g_mcs_len < (int)sizeof(g_mcs_buf)) {
-        {
-            int n = rx_take(g_mcs_handle, g_mcs_buf + g_mcs_len, sizeof(g_mcs_buf) - g_mcs_len);
-            if (n > 0) g_mcs_len += n;
-        }
-    }
-    if (g_mcs_len == 0) { *res = 0; return; }
-
-    while (g_mcs_len - pos > 0) {
-        int rem = g_mcs_len - pos;
-        u8 first = g_mcs_buf[pos];
-        if (first == 0x28) {
-            int plen, need;
-            if (rem < 12) break;
-            plen = (g_mcs_buf[pos + 4] << 8) | g_mcs_buf[pos + 5];
-            need = plen + 14;
-            if (rem < plen + 12 || maxlen - o < need) break;
-            out[o]     = (u8)need;
-            out[o + 1] = 0x60;
-            memcpy(out + o + 2, g_mcs_buf + pos, plen + 12);
-            o += 14;
-            pos += 12 + plen;
-        } else {
-            int rl = first;
-            if (rl == 0) { pos++; continue; }          /* protecao contra laco infinito */
-            if (rem < rl || maxlen - o < rl) break;
-            memcpy(out + o, g_mcs_buf + pos, rl);
-            pos += rl;
-            o += rl;
-        }
-    }
-    if (o > 0) {
-        int left = g_mcs_len - pos;
-        *res = o;
-        if (left > 0) memmove(g_mcs_buf, g_mcs_buf + pos, left);
-        g_mcs_len = (left > 0) ? left : 0;
-    }
-}
-
 /* ---------- despachante RPC ---------- */
 static void *rpc_dispatch(int cmd, void *data, int size)
 {
@@ -208,11 +151,11 @@ static void *rpc_dispatch(int cmd, void *data, int size)
     if (cmd >= 0 && cmd < 80) g_cnt[cmd]++;
 
     switch (cmd) {
-    case 3: case 4:                         /* SetOpt / GetOpt */
-        LOG("cmd %d SetOpt/GetOpt h=%d lvl=%d opt=%d\n", cmd, *(s16 *)(b + 28), *(s16 *)(b + 30), *(s16 *)(b + 32));
+    case 0: case 1: case 2: case 3: case 4:        /* Getconfig/Ifconfig/Ifdown/SetOpt/GetOpt */
+        LOG("cmd %d cfg/opt h=%d\n", cmd, *(s16 *)(b + 28));
         *res = 0;
         break;
-    case 5: case 6: case 31: case 32: case 57: case 58:   /* Init / Disp */
+    case 5: case 6: case 31: case 32: case 56: case 57:   /* Init / Term / Disp */
         LOG("cmd %d init/disp\n", cmd);
         *res = 0;
         break;
@@ -220,7 +163,7 @@ static void *rpc_dispatch(int cmd, void *data, int size)
     case 7: {                               /* TcpOpen */
         u32 ip = *(u32 *)(b + 28);
         u16 p1 = *(u16 *)(b + 32), p2 = *(u16 *)(b + 34);
-        u16 netport = p1 ? p1 : p2;                 /* o jogo passa a porta em ordem de rede (37926 = 9876) */
+        u16 netport = p1 ? p1 : p2;         /* o jogo passa a porta em ordem de rede (0x9426 = 9876, 0xe425 = 9700) */
         u16 port = (u16)(((netport >> 8) & 0xff) | ((netport & 0xff) << 8));
         if (SERVER_PORT) port = SERVER_PORT;
         LOG("TcpOpen ip=%08x p1=%u p2=%u -> conectando na porta %u\n", ip, p1, p2, port);
@@ -230,23 +173,20 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         LOG("TcpOpen resultado=%d\n", *res);
         break;
     }
-    case 11:
+    case 11: case 12:                       /* TcpClose / TcpAbort */
         LOG("TcpClose h=%d\n", *(s16 *)(b + 28));
         do_tcp_close(*(s16 *)(b + 28));
         break;
     case 14: {                              /* TcpStat */
-        static int stat_n = 0, last_av = -1;
+        static int last_av = -1;
         int h = *(s16 *)(b + 28), fd = sock_of(h), av;
         memset(b + 28, 0, 16);
-        if (fd < 0) {
-            if (stat_n < 8) { LOG("TcpStat h=%d INVALIDO (fd=%d)\n", h, fd); stat_n++; }
-            *res = -1;
-            break;
-        }
+        if (fd < 0) { LOG("TcpStat h=%d INVALIDO\n", h); *res = -1; break; }
         rx_fill(h);
         av = g_rxlen[h];
         *(u16 *)(b + 30) = 4;               /* estado: ESTABLISHED */
-        *(u16 *)(b + 36) = (u16)av;         /* bytes disponiveis */
+        *(u16 *)(b + 34) = 8192;            /* janela de envio */
+        *(u16 *)(b + 36) = (u16)av;         /* bytes disponiveis (recvwin) */
         if (av != last_av) { LOG("TcpStat h=%d -> estado=4 disponiveis=%d\n", h, av); last_av = av; }
         *res = 0;
         break;
@@ -273,7 +213,7 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         break;
     }
 
-    case 33:                                /* PppStart */
+    case 33:                                /* PppStart (sem modem: simulamos a conexao) */
         LOG("PppStart (sem modem: simulando conexao)\n");
         g_ppp_on = 1; g_ppp_polls = 0;
         *res = 0;
@@ -283,26 +223,28 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         g_ppp_on = 0;
         *res = 0;
         break;
-    case 35: {                              /* PppStatus */
+    case 35: {                              /* PppStatus: res = fase; struct AvepppStatus em +28 */
         static int last = -1;
         int st = 0;
         memset(b + 28, 0, 48);
         if (g_ppp_on) { st = (g_ppp_polls < 3) ? g_ppp_polls + 1 : 4; g_ppp_polls++; }
-        *(s16 *)(b + 36) = (s16)st;          /* status que o jogo le em 0x42b1f0 (4 = conectado) */
-        *(s16 *)(b + 64) = (s16)st;          /* variante em 0x42ac60 */
+        *(u32 *)(b + 28) = g_server_ip;     /* his_ip */
+        *(u16 *)(b + 36) = (u16)st;         /* phase (o jogo le em 0x3363e0 e usa como codigo 0..7) */
+        *(u32 *)(b + 40) = 56000;           /* baud */
+        *(u16 *)(b + 46) = 0;               /* last_error = nenhum */
         if (st != last) { LOG("PppStatus -> %d\n", st); last = st; }
-        *res = 0;
+        *res = st;                          /* 4 = AvepppConnectEstablished */
         break;
     }
-    case 36:                                /* PppGetUsbDeviceId */
+    case 36:                                /* PppUsbDeviceId */
         *(u32 *)(b + 28) = 0x05720000 | 0x1272;
-        *res = 1;                            /* != 0: senao o jogo marca "modem ausente" */
+        *res = 1;
         break;
-    case 37:                                /* PppSetOption */
+    case 37: case 38:                       /* PppSetOption / GetOption */
         *res = 0;
         break;
 
-    case 59: {                              /* DnsGetTicket */
+    case 58: {                              /* DnsGetTicket */
         int t;
         for (t = 1; t <= MAXTICKET; t++) if (!g_ticket_used[t]) break;
         if (t > MAXTICKET) { *res = -1; break; }
@@ -313,42 +255,26 @@ static void *rpc_dispatch(int cmd, void *data, int size)
         *res = t;
         break;
     }
-    case 60: {
+    case 59: {                              /* DnsReleaseTicket */
         int t = *(s16 *)(b + 28);
         if (t >= 1 && t <= MAXTICKET) g_ticket_used[t] = 0;
         *res = 0;
         break;
     }
-    case 61: {                              /* DnsLookup */
+    case 60: {                              /* DnsLookup */
         int t = *(s16 *)(b + 28);
         if (t < 1 || t > MAXTICKET || !g_ticket_used[t]) { *res = -1; break; }
         *(u32 *)(b + 32) = g_server_ip;
         LOG("DnsLookup ticket %d (%s) -> %d.%d.%d.%d\n", t, g_ticket_name[t], (int)(g_server_ip & 0xff), (int)((g_server_ip >> 8) & 0xff), (int)((g_server_ip >> 16) & 0xff), (int)((g_server_ip >> 24) & 0xff));
-        *res = 1;                            /* 1 = pronto (0 o jogo trata como erro) */
+        *res = 1;                            /* 1 = pronto */
         break;
     }
-
-    case 64:                                /* McsInitialize */
-        g_mcs_handle = *(s32 *)(b + 0);
-        g_mcs_len = 0;
-        LOG("McsInitialize handle=%d\n", g_mcs_handle);
-        *res = 0;
-        break;
-    case 65:
-        LOG("McsDispose\n");
-        g_mcs_handle = -1; g_mcs_len = 0;
-        *res = 0;
-        break;
-    case 67:
-        do_mcs_receive(b, res);
-        if (*res > 0) {
-            char hex[100]; int i, n = *res > 40 ? 40 : *res;
-            for (i = 0; i < n; i++) sprintf(hex + i * 2, "%02x", b[32 + i]);
-            LOG("McsReceive %d bytes: %s\n", *res, hex);
-        }
+    case 61: case 62:                       /* DnsLookupRev / DnsGetTicketInfo: nao usados */
+        *res = -1;
         break;
 
     default:
+        if (cmd >= 63 && cmd <= 77) { *res = 0; break; }   /* Com*: nao usados aqui */
         LOG("comando RPC nao tratado: %d\n", cmd);
         *res = -1;
         break;
@@ -397,14 +323,14 @@ static void net_thread(void *arg)
                 (int)(g_server_ip & 0xff), (int)((g_server_ip >> 8) & 0xff), (int)((g_server_ip >> 16) & 0xff), (int)((g_server_ip >> 24) & 0xff),
                 found ? "(descoberto)" : "(config.h)");
         logmsg(msg);
-        sprintf(msg, "[avewrap] cnt: open=%d stat=%d send=%d recv=%d mcsInit=%d mcsRecv=%d pppSt=%d usbId=%d dns=%d outros=%d\n",
-                (int)g_cnt[7], (int)g_cnt[14], (int)g_cnt[15], (int)g_cnt[18], (int)g_cnt[64], (int)g_cnt[67],
-                (int)g_cnt[35], (int)g_cnt[36], (int)g_cnt[61], (int)(g_cnt[3] + g_cnt[4] + g_cnt[11] + g_cnt[65]));
+        sprintf(msg, "[avewrap] cnt: open=%d stat=%d send=%d recv=%d pppStart=%d pppSt=%d dnsTk=%d dnsLk=%d outros=%d\n",
+                (int)g_cnt[7], (int)g_cnt[14], (int)g_cnt[15], (int)g_cnt[18], (int)g_cnt[33],
+                (int)g_cnt[35], (int)g_cnt[58], (int)g_cnt[60], (int)(g_cnt[3] + g_cnt[4] + g_cnt[11] + g_cnt[59]));
         logmsg(msg);
-        lwip_sendto(g_logfd, (void *)"MVC2-DISCOVER", 13, 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
+        lwip_sendto(g_logfd, (void *)"CVS2-DISCOVER", 13, 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
         fromlen = sizeof(from);
         n = lwip_recvfrom(g_logfd, rb, sizeof(rb) - 1, 0, (struct sockaddr *)&from, &fromlen);
-        if (n >= 11 && memcmp(rb, "MVC2-SERVER", 11) == 0) { g_server_ip = from.sin_addr.s_addr; found = 1; g_found = 1; }
+        if (n >= 11 && memcmp(rb, "CVS2-SERVER", 11) == 0) { g_server_ip = from.sin_addr.s_addr; found = 1; g_found = 1; }
         DelayThread(2000 * 1000);
     }
 }

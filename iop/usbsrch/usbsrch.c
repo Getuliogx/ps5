@@ -1,4 +1,5 @@
 /*
+ * (CvS2) Mesmo RPC/estrutura do MvC2; o CvS2 tambem tem 0572:1272 na tabela de modems (0x3a27f0, tipo 2 = CXTMDM).
  * Substituto do USB_SRCH.IRX (Capcom_USB_Device_Searcher).
  * O jogo pergunta por RPC (ID 0x01270010) qual modem USB foi encontrado.
  * Aqui sempre respondemos "encontrado" com o ID Conexant 0572:1272 (tipo 2 na tabela do jogo),
