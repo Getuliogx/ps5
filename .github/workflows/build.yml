@@ -42,9 +42,12 @@ jobs:
         if: always()
         shell: sh
         run: |
-          cp iop/loader/loader.irx out/MODULES/CXTMDM.IRX   2>/dev/null || true
-          cp iop/loader/loader.irx out/MODULES/OSTMDM_A.IRX 2>/dev/null || true
+          # drivers de modem (CXTMDM = Conexant, OMMODEM = Omron, OSTMDM_A = outro) -> carregador de rede
+          for n in CXTMDM OMMODEM OSTMDM_A; do cp iop/loader/loader.irx out/MODULES/$n.IRX 2>/dev/null || true; done
+          # PPP/TCP originais -> modulo vazio
           for n in AVEPPP AVE_WRAP AVETCP; do cp iop/empty/empty.irx out/MODULES/$n.IRX 2>/dev/null || true; done
+          # ACC_COM (API serial): o stub entra com o mesmo nome, carregado pelo proprio jogo na ordem certa
+          cp iop/acccom/acccom.irx out/MODULES/ACC_COM.IRX 2>/dev/null || true
           cp iop/avewrap/avewrap2.irx out/MODULES/AVEWRAP2.IRX 2>/dev/null || true
           cp iop/usbsrch/usbsrch.irx out/MODULES/USB_SRCH.IRX 2>/dev/null || true
           cp $PS2SDK/iop/irx/ps2dev9.irx out/MODULES/PS2DEV9.IRX 2>/dev/null || true
@@ -56,13 +59,13 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mvc2-online
+          name: cvs2-online
           path: out/
 
       - name: FALHAR se nao compilou
         shell: sh
         run: |
-          for f in iop/loader/loader.irx iop/empty/empty.irx iop/avewrap/avewrap2.irx iop/usbsrch/usbsrch.irx; do
+          for f in iop/loader/loader.irx iop/empty/empty.irx iop/avewrap/avewrap2.irx iop/usbsrch/usbsrch.irx iop/acccom/acccom.irx; do
             if [ ! -f "$f" ]; then echo "ERRO: $f nao foi gerado. Veja o log acima."; exit 1; fi
           done
           echo "Todos os modulos compilaram."
