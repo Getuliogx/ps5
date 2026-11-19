@@ -31,3 +31,18 @@ Serve de ponto de partida; o que o CvS2 mandar de diferente aparece como NOVO no
 1. Compilar, trocar modulos na ISO, rodar e enviar capture.log.
 2. Ver se o jogo chega a TcpOpen e as primeiras mensagens (0x6001/0x6004/0x6101...).
 3. Ajustar o stub ACC_COM se o jogo travar no bind/carga.
+
+## Modem virtual / luta (v0.4) - decifrado no ELF
+Apos o 6906 o jogo manda 6002 (logout), derruba a pilha AVE (cmds 57/32/6) e entra em `network_mode04` (0x15c3b4):
+fase 0 `modem_module_initialize` (carrega AVETCP/USB_SRCH, bind RPC, busca modem USB) -> fase 1 `modem_connect` -> fase 2 `match_IO_sync` -> luta.
+- API Com* (RPC 0x01270020, cliente em 0x54eaa0, buffer 0x54f100, layout compacto): 0 Initialize | 1 Open (8 bytes -> handle) |
+  2 Read ([0]=handle,[4]=max -> [0]=n, dados em +4) | 3 Write ([0]=handle,[4]=len, dados em +8 -> [0]=n) | 4 Close | 6 CarrierCheck | 7 Finish | 8 Reflush.
+- `modem_connect_20` (0x19b800) manda cada linha do script AT + "\r\n" e REPETE ComWrite ate o retorno == len (retorno 0 = laco infinito);
+  espera "OK" (aceita eco). Depois ATDT<numero do 6906>: espera "CONNECT" (trata "NO CARRIER", "BUSY"; timeout 3600 frames).
+- Papel: `gp-22544` = 1 (quem disca) quando `gp-22540` == 0 (internet_to_modem @0x314b90). Com o 6902=1 o PS2 e sempre quem disca.
+- Handshake em texto: chamador manda "\nPING\n" e re-manda "PING\n" ate 8 "PONG"; depois "START\n". Sync (`match_IO_sync` 0x19c460): "\nREADY\n" -> "OK" -> "START\n".
+- Luta: pacotes de 20 bytes por frame (read_out 0x19c710 / read_in 0x19c8c0). Little-endian, campos a cada 4 bytes:
+  +0 entrada A (u16) | +4 entrada B | +8 (byte baixo = tipo de controle; bit 0x10 = dado extra; byte alto = flags) | +12 frame (6 bits, comeca em 1) | resto 0.
+  Em lockstep: o frame do oponente tem que ser exatamente o esperado ou o jogo marca erro de sincronia (gp-22460). Janela de atraso ~ (0x4a1... + 2) frames.
+  match_IO_get (0x19cc00) calcula bordas de subida/descida (entradas ativas em 1).
+- O contador `usb:`/`acc:` do heartbeat da v0.3 era dos despachantes NAO registrados do avewrap (sempre 0): nao provava nada.

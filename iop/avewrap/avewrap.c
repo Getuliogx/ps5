@@ -24,7 +24,7 @@
 #include "irx_imports.h"
 #include "config.h"
 
-IRX_ID("Capcom_AVE_TCP_Wrapper", 1, 3);
+IRX_ID("Capcom_AVE_TCP_Wrapper", 1, 4);
 
 /* v0.3: carregado no lugar do AVETCP.IRX (1o modulo lido pelo jogo) para a rede/log subirem cedo.
  * Atende so o RPC do AVE_WRAP (0x01270030). USB_SRCH e ACC_COM voltam a ser modulos proprios e RESIDENTES,
@@ -316,14 +316,196 @@ static void *usb_dispatch(int cmd, void *data, int size)
     return data;
 }
 
-/* ---------- ACC_COM (RPC 0x01270020): API serial; responde 0 (primeira palavra) a tudo ---------- */
+/* ---------- ACC_COM (RPC 0x01270020): MODEM HAYES VIRTUAL (v0.4) ----------
+ * O jogo (modem_connect_*, ELF 0x19b500..0x19c370) conversa com um modem pela API serial Com*:
+ *   cmd 0 Initialize   cmd 1 Open(8 bytes de parametros) -> handle   cmd 2 Read(handle,max) -> n, dados em +4
+ *   cmd 3 Write(handle,len,dados em +8) -> n escritos   cmd 4 Close   cmd 6 CarrierCheck -> 0/1
+ *   cmd 7 Finish   cmd 8 Reflush        (layout compacto: sem cabecalho, retorno na 1a palavra do buffer)
+ * ATENCAO: o jogo repete ComWrite ATE retornar exatamente 'len' (modem_connect_20 @0x19b8c4). Responder 0 = laco infinito.
+ *
+ * Modo comando: cada linha terminada em CR/LF vira uma resposta "OK"; "ATD..."/"ATA" abre TCP no PC (P2P_PORT) e
+ * responde "CONNECT 56000"; "ATH" desliga. Modo dados (depois do CONNECT): bytes de Write vao pelo socket e o que
+ * chega do socket volta em Read. ComCarrierCheck = socket aberto. */
+#define RESPSZ 256
+static u8 g_resp[RESPSZ];
+static int g_resp_h = 0, g_resp_t = 0;           /* fila modem -> jogo (respostas de texto) */
+static char g_atbuf[100];
+static int g_atlen = 0;
+static int g_com_open = 0, g_carrier = 0, g_com_h = 0;
+static u32 g_com_tx = 0, g_com_rx = 0;
+static int g_com_dbg = 0;
+
+static void resp_put(const char *s)
+{
+    while (*s) {
+        int n = (g_resp_t + 1) % RESPSZ;
+        if (n == g_resp_h) break;
+        g_resp[g_resp_t] = (u8)*s++;
+        g_resp_t = n;
+    }
+}
+
+static int resp_get(u8 *d, int max)
+{
+    int n = 0;
+    while (n < max && g_resp_h != g_resp_t) {
+        d[n++] = g_resp[g_resp_h];
+        g_resp_h = (g_resp_h + 1) % RESPSZ;
+    }
+    return n;
+}
+
+static void hexlog(const char *tag, const u8 *d, int n)
+{
+    char hex[100]; int i, k = n > 24 ? 24 : n;
+    for (i = 0; i < k; i++) sprintf(hex + i * 2, "%02x", d[i]);
+    hex[k * 2] = 0;
+    LOG("%s %d bytes: %s\n", tag, n, hex);
+}
+
+static void com_hangup(void)
+{
+    if (g_com_h > 0) {
+        LOG("modem: desligando (tx=%d rx=%d)\n", (int)g_com_tx, (int)g_com_rx);
+        do_tcp_close(g_com_h);
+    }
+    g_com_h = 0;
+    g_carrier = 0;
+}
+
+static void com_link_up(void)
+{
+    int h, w;
+    for (w = 0; w < 100 && !g_net_ready; w++) DelayThread(100 * 1000);
+    LOG("modem: discando -> %d.%d.%d.%d:%d\n", (int)(g_server_ip & 0xff), (int)((g_server_ip >> 8) & 0xff),
+        (int)((g_server_ip >> 16) & 0xff), (int)((g_server_ip >> 24) & 0xff), P2P_PORT);
+    h = do_tcp_open(g_server_ip, P2P_PORT);
+    if (h > 0) {
+        g_com_h = h; g_carrier = 1; g_com_tx = 0; g_com_rx = 0; g_com_dbg = 0;
+        LOG("modem: CONNECT (handle tcp %d)\n", h);
+        resp_put("\r\nCONNECT 56000\r\n");
+    } else {
+        LOG("modem: sem resposta do PC na porta %d (%d) -> NO CARRIER. Servidor rodando? Firewall liberado?\n", P2P_PORT, h);
+        resp_put("\r\nNO CARRIER\r\n");
+    }
+}
+
+static void at_line(const char *l)
+{
+    char u[100];
+    int i;
+    for (i = 0; l[i] && i < 99; i++) u[i] = (l[i] >= 'a' && l[i] <= 'z') ? (char)(l[i] - 32) : l[i];
+    u[i] = 0;
+    LOG("modem AT: \"%s\"\n", u);
+    if (u[0] == 'A' && u[1] == 'T' && u[2] == 'D') com_link_up();                      /* ATD / ATDT / ATDP */
+    else if (u[0] == 'A' && u[1] == 'T' && u[2] == 'A' && u[3] == 0) com_link_up();   /* ATA: atender */
+    else if (u[0] == 'A' && u[1] == 'T' && u[2] == 'H') { com_hangup(); resp_put("\r\nOK\r\n"); }
+    else resp_put("\r\nOK\r\n");
+}
+
+static int com_write(const u8 *d, int len)
+{
+    int i;
+    if (len <= 0) return 0;
+    if (g_carrier) {                                  /* modo dados */
+        int fd = sock_of(g_com_h), sent = 0;
+        while (fd >= 0 && sent < len) {
+            int n = lwip_send(fd, (void *)(d + sent), len - sent, 0);
+            if (n <= 0) break;
+            sent += n;
+        }
+        if (sent < len) { LOG("modem: falha ao enviar (%d/%d)\n", sent, len); return -1; }
+        g_com_tx += sent;
+        if (g_com_dbg < 40) { g_com_dbg++; hexlog("modem TX", d, len); }
+        return len;
+    }
+    for (i = 0; i < len; i++) {                       /* modo comando: acumula ate CR/LF */
+        char c = (char)d[i];
+        if (c == '\r' || c == '\n') {
+            if (g_atlen > 0) { g_atbuf[g_atlen] = 0; g_atlen = 0; at_line(g_atbuf); }
+        } else if (g_atlen < 98) {
+            g_atbuf[g_atlen++] = c;
+        }
+    }
+    return len;
+}
+
+static int com_carrier(void)
+{
+    if (!g_carrier) return 0;
+    rx_fill(g_com_h);
+    if (g_rxclosed[g_com_h] && g_rxlen[g_com_h] == 0) {
+        LOG("modem: o PC fechou o link -> NO CARRIER\n");
+        com_hangup();
+        return 0;
+    }
+    return 1;
+}
+
+static int com_read(u8 *d, int max)
+{
+    int n = resp_get(d, max);
+    if (n == 0 && g_carrier) {
+        n = rx_take(g_com_h, d, max);
+        if (n > 0) {
+            g_com_rx += n;
+            if (g_com_dbg < 40) { g_com_dbg++; hexlog("modem RX", d, n); }
+        }
+    }
+    return n;
+}
+
 static void *acc_dispatch(int cmd, void *data, int size)
 {
-    u32 *p = (u32 *)data;
+    u8 *b = (u8 *)data;
+    s32 *w = (s32 *)data;
     int c = (cmd >= 0 && cmd < 16) ? cmd : 15;
     g_cnt_acc[c]++;
-    if (g_cnt_acc[c] <= 3) LOG("ACC_COM cmd %d (chamada %d)\n", cmd, (int)g_cnt_acc[c]);
-    p[0] = 0;
+    switch (cmd) {
+    case 0:                                           /* ComInitialize */
+        LOG("Com cmd 0 Initialize\n");
+        w[0] = 0;
+        break;
+    case 1:                                           /* ComOpen(8 bytes) -> handle */
+        g_com_open = 1; g_atlen = 0; g_resp_h = g_resp_t = 0;
+        LOG("Com cmd 1 Open (param=%02x%02x%02x%02x%02x%02x%02x%02x) -> handle 1\n", b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+        w[0] = 1;
+        break;
+    case 2: {                                         /* ComRead(handle, max): n em +0, dados em +4 */
+        int max = w[1];
+        if (max < 0) max = 0;
+        if (max > RPCBUF_SZ - 8) max = RPCBUF_SZ - 8;
+        w[0] = com_read(b + 4, max);
+        break;
+    }
+    case 3: {                                         /* ComWrite(handle, len, dados em +8) */
+        int len = w[1];
+        if (len > RPCBUF_SZ - 16) len = RPCBUF_SZ - 16;
+        w[0] = com_write(b + 8, len);
+        break;
+    }
+    case 4:                                           /* ComClose */
+        LOG("Com cmd 4 Close\n");
+        com_hangup();
+        g_com_open = 0;
+        w[0] = 0;
+        break;
+    case 6:                                           /* ComCarrierCheck */
+        w[0] = com_carrier();
+        break;
+    case 7:                                           /* ComFinish */
+        LOG("Com cmd 7 Finish\n");
+        w[0] = 0;
+        break;
+    case 8:                                           /* ComReflush: descarta o que estava pendente */
+        g_resp_h = g_resp_t = 0; g_atlen = 0;
+        w[0] = 0;
+        break;
+    default:
+        if (g_cnt_acc[c] <= 3) LOG("Com cmd %d nao tratado\n", cmd);
+        w[0] = 0;
+        break;
+    }
     return data;
 }
 
@@ -361,7 +543,7 @@ static void net_thread(void *arg)
     set_nonblock(g_logfd);
     for (i = 0; i < g_early_n; i++)                      /* logs de antes da rede subir */
         lwip_sendto(g_logfd, g_early[i], strlen(g_early[i]), 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
-    logmsg("[avewrap] === rede no ar (v0.3) ===\n");
+    logmsg("[avewrap] === rede no ar (v0.4) ===\n");
 
     for (;;) {
         u32 a = 0;
@@ -376,9 +558,9 @@ static void net_thread(void *arg)
                 (int)g_cnt[7], (int)g_cnt[14], (int)g_cnt[15], (int)g_cnt[18], (int)g_cnt[33],
                 (int)g_cnt[35], (int)g_cnt[58], (int)g_cnt[60], (int)(g_cnt[3] + g_cnt[4] + g_cnt[11] + g_cnt[59]));
         logmsg(msg);
-        sprintf(msg, "[avewrap] usb: c1=%d c2=%d c3=%d c4=%d c5=%d | acc: c1=%d c2=%d c3=%d c4=%d c5=%d c6=%d c7=%d c8=%d\n",
-                (int)g_cnt_usb[1], (int)g_cnt_usb[2], (int)g_cnt_usb[3], (int)g_cnt_usb[4], (int)g_cnt_usb[5],
-                (int)g_cnt_acc[1], (int)g_cnt_acc[2], (int)g_cnt_acc[3], (int)g_cnt_acc[4], (int)g_cnt_acc[5],
+        sprintf(msg, "[avewrap] modem: open=%d carrier=%d tx=%d rx=%d | cmds 0:%d 1:%d 2:%d 3:%d 4:%d 6:%d 7:%d 8:%d\n",
+                (int)g_com_open, (int)g_carrier, (int)g_com_tx, (int)g_com_rx,
+                (int)g_cnt_acc[0], (int)g_cnt_acc[1], (int)g_cnt_acc[2], (int)g_cnt_acc[3], (int)g_cnt_acc[4],
                 (int)g_cnt_acc[6], (int)g_cnt_acc[7], (int)g_cnt_acc[8]);
         logmsg(msg);
         lwip_sendto(g_logfd, (void *)"CVS2-DISCOVER", 13, 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
@@ -402,13 +584,13 @@ int _start(int argc, char *argv[])
     g_srvlog.sin_family = AF_INET; g_srvlog.sin_port = HTONS(LOG_PORT);
 
     g_fn[0] = rpc_dispatch; g_fn[1] = usb_dispatch; g_fn[2] = acc_dispatch;
-    for (i = 0; i < 1; i++) {      /* so o AVE_WRAP (indice 0) */
+    for (i = 0; i < NRPC; i += 2) {   /* indices 0 (AVE_WRAP) e 2 (ACC_COM = modem virtual). O 1 (USB_SRCH) e o usbsrch.irx */
         th.attr = TH_C; th.option = 0; th.thread = rpc_thread; th.stacksize = 0x4000; th.priority = 0x28;
         tid = CreateThread(&th);
         if (tid <= 0) return MODULE_NO_RESIDENT_END;
         StartThread(tid, (void *)i);
     }
-    LOG("modulo iniciado: RPC AVE_WRAP registrado (v0.3)\n");
+    LOG("modulo iniciado: RPC AVE_WRAP + ACC_COM (modem virtual) registrados (v0.4)\n");
 
     th.thread = net_thread; th.priority = 0x30;
     tid = CreateThread(&th);

@@ -9,4 +9,6 @@
 #define SERVER_PORT 0
 /* Porta UDP para onde o PS2 manda os logs (o servidor do PC escuta nela). */
 #define LOG_PORT 9999
+/* Porta TCP do "modem virtual" (link com o oponente/BOT no PC). O jogo disca ATDT e o AVEWRAP2 conecta aqui. */
+#define P2P_PORT 9877
 #endif

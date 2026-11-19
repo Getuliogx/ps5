@@ -9,7 +9,7 @@ Mas NADA disso foi testado no CvS2 ainda: o que o jogo mandar de diferente apare
 Executa a conversa de LOGIN que foi decifrada no ELF do jogo (veja NOTAS_TECNICAS.md):
 
   Servidor ao conectar:  6001 (ping)  6004 (pronto)  6101 (token de 8 bytes)
-  Passo A:   jogo 6101 -> servidor 6102 ;  jogo 6102(token) -> servidor 6103 (aviso vazio) ;  jogo avanca
+  Passo A (CvS2): jogo 6101 -> servidor 6110 (sem 6102/6103; confirmado no ELF 0x315000)
   Passo B:   jogo 6820(4 bytes) -> servidor 6820 + 6822 ;  jogo 6110 (fim do passo B)
   Fim do B:  jogo 6110 com 1 byte = MODO. modo 0 -> passo D | modo 1,2 -> passo C | modo 3 -> passo G
   Passo C:   servidor manda 6131..6139, uma de cada vez; o jogo responde cada uma com os dados do cadastro
@@ -26,7 +26,7 @@ Mensagens: cabecalho de 12 bytes + corpo.
 
 Tudo vai para capture.log (envie esse arquivo).
 """
-import argparse, socket, struct, threading, time, sys, os, json, unicodedata
+import argparse, socket, struct, threading, time, sys, os, json, unicodedata, random
 
 LOG = open("capture.log", "a", encoding="utf-8")
 LOCK = threading.Lock()
@@ -40,14 +40,14 @@ TOKEN = b"CVS2TKN1"          # 8 bytes: o jogo devolve isto no 6102
 CHAVE = b"CVS2"              # duas strings iguais no 6820 => o jogo pula a lista de escolha
 
 NOMES = {
-    0x6001: "ping/pong", 0x6002: "desistir", 0x6101: "login-1", 0x6102: "login-2 (token)", 0x6103: "aviso",
+    0x6001: "ping/pong", 0x6002: "logout/desistir", 0x6101: "login-1", 0x6102: "login-2 (token)", 0x6103: "aviso",
     0x6110: "login-fim", 0x6111: "lista-de-perfis", 0x6112: "perfil-confirmado", 0x613A: "cadastro-inicio",
     0x6131: "cadastro-1", 0x6132: "cadastro-2", 0x6133: "cadastro-3", 0x6134: "cadastro-4", 0x6135: "cadastro-5",
     0x6136: "cadastro-6", 0x6137: "cadastro-7", 0x6138: "cadastro-8", 0x6139: "cadastro-9",
     0x6114: "perfil-1", 0x6115: "perfil-2", 0x6116: "perfil-3", 0x6117: "perfil-4", 0x6118: "perfil-fim",
     0x6120: "perfil-5", 0x6122: "perfil-dados", 0x6820: "pedido-lista", 0x6821: "item-lista", 0x6822: "fim-lista", 0x6823: "escolha",
     0x6801: "lista-de-salas", 0x6802: "descricao-da-sala", 0x6142: "lobby-pronto", 0x6143: "lobby-143", 0x6841: "lista-841",
-    0x6810: "info-810", 0x6861: "handshake-861", 0x6144: "info-144", 0x6145: "info-145", 0x6148: "cliente-148", 0x6851: "lista-851", 0x6149: "info-149", 0x6141: "fim-141", 0x6207: "entrar-lobby", 0x6205: "contagem-205", 0x6303: "contagem-303", 0x6305: "entrar-sala", 0x6306: "sala-306", 0x6209: "buscar-oponente", 0x6401: "salas-total", 0x6402: "sala-nome", 0x6403: "sala-pessoas", 0x6404: "sala-estado", 0x6406: "sala-406", 0x6504: "busca-504", 0x6910: "partida-encontrada(BOT)", 0x6911: "partida-911", 0x6912: "partida-912", 0x6913: "partida-913(perfil do oponente)", 0x6914: "partida-914", 0x6915: "partida-915", 0x6916: "partida-916(IP do oponente)", 0x6917: "partida-917(iniciar)", 0x6506: "sala-506", 0x6501: "sala-501", 0x6830: "info-830", 0x6831: "info-831", 0x6832: "info-832", 0x6833: "info-833", 0x6835: "info-835",
+    0x6810: "info-810", 0x6861: "handshake-861", 0x6144: "info-144", 0x6145: "info-145", 0x6148: "cliente-148", 0x6851: "lista-851", 0x6149: "info-149", 0x6141: "fim-141", 0x6207: "entrar-lobby", 0x6205: "contagem-205", 0x6303: "contagem-303", 0x6305: "entrar-sala", 0x6306: "sala-306", 0x6209: "buscar-oponente", 0x6401: "salas-total", 0x6402: "sala-nome", 0x6403: "sala-pessoas", 0x6404: "sala-estado", 0x6406: "sala-406", 0x6504: "busca-504", 0x6910: "partida-encontrada(BOT)", 0x6911: "partida-911", 0x6912: "partida-912", 0x6913: "partida-913(perfil do oponente)", 0x6914: "partida-914", 0x6915: "partida-915", 0x6916: "partida-916(IP do oponente)", 0x6917: "partida-917(iniciar)", 0x6506: "sala-506", 0x6501: "sala-501", 0x6901: "partida-encontrada(BOT)", 0x6902: "lado", 0x6903: "perfil-do-oponente", 0x6904: "regras", 0x6905: "codigo-da-batalha", 0x6906: "endereco-do-oponente", 0x7006: "torneio-status(7006)", 0x7010: "torneio-hora(7010)", 0x700c: "tr-info(700c)", 0x7007: "tr-entry-join(7007)", 0x7001: "tr-entry-again(7001)", 0x6830: "info-830", 0x6831: "info-831", 0x6832: "info-832", 0x6833: "info-833", 0x6835: "info-835",
 }
 
 
@@ -92,8 +92,8 @@ def resposta(tipo, corpo):
     """Passos A e B (sem estado)."""
     if tipo == 0x6001:                       # pong do jogo
         return []
-    if tipo == 0x6101:                       # jogo aceitou o login-1  -> pede o token
-        return [(0x6102, b"")]
+    if tipo == 0x6101:                       # CvS2: o passo A (0x315000) so trata 6101/6103/6110; NAO existe 6102.
+        return [(0x6110, b"")]               # jogo respondeu o login-1 -> 6110 encerra o passo A (estado 5)
     if tipo == 0x6102:                       # jogo devolveu o token   -> aviso vazio (o jogo pula a tela de aviso)
         return [(0x6103, b"\x00" + s16(b"") + s16(b"") + struct.pack(">H", 0))]
     if tipo == 0x6103:                       # jogo confirmou o aviso
@@ -218,7 +218,7 @@ def lobby(tipo, corpo):
     if tipo == 0x6810:      # servidor 6810 status 0: [string][string][u8]  (0x440560)
         return [(0x6810, s16(b"") + s16(b"") + bytes([0]))]
     if tipo == 0x6861:      # jogo manda 6861 [u8][u8][4 bytes]. Resposta com STATUS != 0 pula o download (0x4354b0
-        return [(0x6861, b"", 1)]      # -> manda 6144). Com status 0 o jogo le um u32 e entra no download 6862..6865.
+        return [(0x6861, b"", 1)]      # -> CvS2: manda 700c (TrInfomation), nao 6144). Com status 0 o jogo le um u32 e entra no download 6862..6865.
     if tipo == 0x6144:      # servidor 6144: [u8][u32][u32]  (0x43e880)
         return [(0x6144, bytes([0]) + struct.pack(">II", 0, 0))]
     if tipo == 0x6145:      # servidor 6145: 5 x u16 + 2 x u32  (0x43e8e0)
@@ -227,6 +227,17 @@ def lobby(tipo, corpo):
         return [(0x6851, bytes([1]) + s16(b"CVS2"))]
     if tipo == 0x6149:      # servidor 6149: 4 x u16  (0x43db70); se struct+268 < 100000 o jogo avanca para o passo I
         return [(0x6149, struct.pack(">HHHH", 0, 0, 0, 0))]
+    # --- v24: cadeia "CAPCOM info" do CvS2 (barra de progresso, lobby_act_00_08 @ 0x316180) ---
+    # Ordem decifrada no ELF: 6810 -> 6861 (status != 0 pula o patch) -> jogo manda 700c e ESPERA a resposta
+    # (era aqui que travava em 76%) -> 7007 -> 6144 -> 6145 -> (6148 + 6851) -> barra 100% -> tela de informacoes.
+    if tipo == 0x700c:      # Send_Req_TrInfomation (0x326e50): [u8 1]. Acc_TrInfomation (0x3274d0): [u8][string -> 0x46d380]
+        return [(0x700c, bytes([0]) + s16(b""), 0)]
+    if tipo == 0x7007:      # Send_Req_TrEntryJoin (0x326d40): sem corpo. Acc_TourEntryJoin (0x327190): so lê 2 bytes [u8][u8]
+        return [(0x7007, bytes([0, 0]), 0)]
+    if tipo == 0x7006:      # Send_Req_TournamentStatus; Acc_TournamentStatus (0x327180): [u8]
+        return [(0x7006, bytes([0]), 0)]
+    if tipo == 0x7010:      # Send_Req_TrEntryTime; Acc_TrEntryTime (0x3275f0): [u16] (0 = nada)
+        return [(0x7010, struct.pack(">H", 0), 0)]
     # --- v11: menu principal (CAPCOM 通信ゲームシステム) ---
     if tipo == 0x6207:      # jogo escolheu o lobby [u16 1]. O ELF (0x435ea0) so olha o STATUS: 0 = sucesso, !=0 = erro
         return [(0x6207, b"", 0)]
@@ -283,43 +294,50 @@ def blob(n=64):
     return struct.pack(">H", n) + bytes(n)
 
 
+def blob_n(n):
+    """bloco binario [u16 tamanho BE][n bytes] (leitor GetRecvDataOption2 @0x323000: memcpy sem limite -> manter pequeno)"""
+    return struct.pack(">H", n) + bytes(n)
+
+
+def regras_padrao():
+    """48 bytes = o que net_rule_default (0x1a2820) grava no jogo. Acc_RuleData (0x325880) copia o blob em 0x46aeb0."""
+    b = bytearray(48)
+    b[0:4] = bytes([1, 1, 2, 2])
+    b[27:32] = bytes([11, 7, 16, 28, 40])
+    b[32:36] = b"\xff\xff\xff\xff"
+    b[36:40] = struct.pack("<I", 0x9fff)
+    b[40:44] = b"\xff\xff\xff\xff"
+    b[44:48] = struct.pack("<I", 0x9fff)
+    return bytes(b)
+
+
 def partida(ss, tipo, corpo):
-    """Troca de dados apos o servidor mandar 6910 (decifrado no ELF, 0x439cb0 / 0x439ee8 / 0x43a130):
-    jogo 6911 -> srv 6911 [u8]
-    jogo 6912 [u8] -> srv 6912 [u8]
-    jogo 6913 [u8] -> srv 6913 [u8][str id][str nome][blob][5 x u16]    (perfil do oponente)
-    jogo 6914 -> srv 6914 [blob]
-    jogo 6915 -> srv 6915 [str]
-    jogo 6917 -> srv 6917 [u8]            (fade + proximo estado)
-    jogo 6916 -> srv 6916 [str 4 bytes = IPv4 do oponente][str 2 bytes = porta, little-endian]
-                 (0x433920: copia os 4 bytes e chama connect(); portas fixas 37926 / 58405 nos modos 0/1, porta do 6916 no modo 2)"""
-    if 0x6911 <= tipo <= 0x6917 and ss.get("sala_at"):
-        out("[BOT] o jogo iniciou a troca da partida sozinho (%04x): nao precisa empurrar 6910" % tipo)
-        ss["sala_at"] = None
-    if tipo == 0x6911:
-        return [(0x6911, bytes([0]), 0)]
-    if tipo == 0x6912:
-        # v16: o jogo guarda esta resposta em gp-18212, subtrai 1 e usa como INDICE DE CANAL (0..1) do Mcs
-        # e como lado (jogador 1/2). Resposta 0 gerava canal -1 e o jogo sempre caia no lado 2.
-        role = corpo[0] if corpo and corpo[0] in (1, 2) else 1
-        ss["role"] = role
-        out("[BOT] 6912: jogo pediu lado %d -> respondendo %d (BOT fica com o lado %d)" % (role, role, 3 - role))
-        return [(0x6912, bytes([role]), 0)]
-    if tipo == 0x6913:
-        return [(0x6913, bytes([0]) + s16(BOT_ID) + s16(BOT_NICK) + blob(64) + struct.pack(">HHHHH", 0, 0, 0, 0, 0), 0)]
-    if tipo == 0x6914:
-        return [(0x6914, blob(64), 0)]
-    if tipo == 0x6915:
-        return [(0x6915, s16(BOT_NICK), 0)]
-    if tipo == 0x6917:
-        return [(0x6917, bytes([0]), 0)]
-    if tipo == 0x6916:
-        ip = socket.inet_aton(ss.get("ip", "127.0.0.1"))
-        out("[BOT] mandando o IP do 'oponente' = %s, porta %d (este PC)" % (ss.get("ip"), BOT_PORTAS[0]))
-        if ss.get("cli"):
-            PEER_PENDING[ss["cli"]] = time.time() + 90
-            threading.Thread(target=peer_fallback, args=(ss["cli"],), daemon=True).start()
-        return [(0x6916, s16(ip) + s16(struct.pack("<H", BOT_PORTAS[0])), 0)]
+    """v25 - preparo de batalha do CvS2 (decifrado no ELF: lobby_act_16_02 @0x31afd0).
+    servidor 6901 (sem corpo)  -> jogo vai para To_ReadyBattle (estado 16). E a UNICA mensagem de 'partida encontrada'
+                                  (a v24 mandava 6910, que e do MvC2: o jogo recebia e ignorava).
+    jogo 6902 [u8 lado 1/2/3]  -> servidor 6902 [u8]   Acc_PlayerSide. Depois o jogo faz (valor-1): se 0 pede o
+                                  endereco do oponente (6906); se !=0 espera o oponente conectar. Respondo sempre 1.
+    jogo 6903                  -> servidor 6903 [str id][str nome][blob 'vsconf'][5 x u16]    (Acc_VsPlayerInfomation)
+    jogo 6904                  -> servidor 6904 [blob 48 bytes de regras]                       (Acc_RuleData)
+    jogo 6905                  -> servidor 6905 [str codigo da batalha]                         (Acc_BattleCode)
+    jogo 6906                  -> servidor 6906 [str 'TelNumber']  (Acc_MatchingTelNumber; o ELF so usa isso em
+                                  modem_connect_20 = ATD<numero>). Mando o IP deste PC em texto.
+    Depois disso o jogo faz fade -> To_DirectConnect -> lobby_act_15 -> manda 6002 (logout) e entra na conexao direta."""
+    if tipo == 0x6902:
+        pedido = corpo[0] if corpo else 3
+        ss["role"] = 1
+        out("[BOT] 6902: jogo pediu lado %d -> respondendo 1 (jogo vai pedir o endereco do oponente: 6906)" % pedido)
+        return [(0x6902, bytes([1]), 0)]
+    if tipo == 0x6903:
+        return [(0x6903, s16(BOT_ID.ljust(6)[:6]) + s16(BOT_NICK) + blob_n(560) + struct.pack(">HHHHH", 0, 0, 0, 0, 0), 0)]
+    if tipo == 0x6904:
+        return [(0x6904, s16(regras_padrao()), 0)]
+    if tipo == 0x6905:
+        return [(0x6905, s16(b"CVS2BOT1"), 0)]
+    if tipo == 0x6906:
+        ip = ss.get("ip", "127.0.0.1").encode("ascii")
+        out("[BOT] 6906: mandando o endereco do 'oponente' = %s (este PC). O proximo passo do jogo (conexao direta) vai aparecer no log" % ip.decode())
+        return [(0x6906, s16(ip), 0)]
     return None
 
 
@@ -426,16 +444,16 @@ def handle(conn, addr, port, idle):
             agora = time.time()
             if ss.get("bot_at") and agora >= ss["bot_at"]:
                 ss["bot_at"] = None
-                out("[BOT] simulando 'oponente encontrado': servidor envia 6910 (o jogo vai para a fase 16 = preparar partida)")
-                enviar(conn, port, 0x6910, b"", "BOT")
+                out("[BOT] simulando 'oponente encontrado': servidor envia 6901 (CvS2: To_ReadyBattle, o jogo vai para a fase 16)")
+                enviar(conn, port, 0x6901, b"", "BOT")
             if ss.get("chat_at") and agora >= ss["chat_at"]:
                 ss["chat_at"] = None
                 out("[BOT] BOT fala no chat da sala (6702)")
                 enviar(conn, port, 0x6702, s16(b"BOT") + s16(b"Aperte o botao da direita para lutar comigo") + s16(b"") + bytes(4), "BOT")
             if ss.get("sala_at") and agora >= ss["sala_at"]:
                 ss["sala_at"] = None
-                out("[BOT] sala: o jogo ficou em silencio %.0fs apos entrar -> servidor envia 6910 (BOT entrou na partida)" % SALA_ESPERA)
-                enviar(conn, port, 0x6910, b"", "BOT")
+                out("[BOT] sala: o jogo ficou em silencio %.0fs apos entrar -> servidor envia 6901 (BOT entrou na partida)" % SALA_ESPERA)
+                enviar(conn, port, 0x6901, b"", "BOT")
             if data:
                 t_rx = agora
                 buf += data
@@ -601,6 +619,123 @@ def peer_fallback(ip):
         return
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# v26 - MODEM VIRTUAL: a luta contra o BOT (CvS2 nao usa TCP entre jogadores: usa a camada de modem Com*).
+# O AVEWRAP2 emula o modem; quando o jogo disca (ATDT) ele conecta AQUI (porta P2P_PORT) e passa a ser o "fio" do modem.
+# Protocolo decifrado no ELF (modem_connect_40/50/60 @0x19bd60..0x19c260, match_IO_sync @0x19c460):
+#   1) PS2 (quem disca) manda  "\nPING\n"  e re-manda "PING\n"; esperamos responder "PONG\n" a cada PING (8 vezes);
+#      depois o PS2 manda "START\n".
+#   2) sincronizacao: PS2 manda "\nREADY\n" -> respondemos "\nOK\n" -> PS2 manda "START\n".
+#   3) luta: PACOTES BINARIOS DE 20 BYTES por frame (match_IO_read_out @0x19c710 / read_in @0x19c8c0), little-endian:
+#        +0 u16 entrada A   +4 u16 entrada B   +8 u16 (byte baixo = tipo de controle, bit 0x10 = dado extra, byte alto = flags)
+#        +12 u16 numero do frame (comeca em 1, 6 bits: 1..63,0,1...)   os outros 2 bytes de cada palavra e +16..19 = 0.
+#      O jogo trava as entradas em lockstep: cada frame do PS2 exige o pacote do oponente com o MESMO numero de frame.
+#      O BOT responde 1 pacote para cada pacote recebido (reativo), com entradas ociosas ou aleatorias (--sem-mash).
+# ---------------------------------------------------------------------------------------------------------------------
+P2P_PORT = 9877
+P2P_MASH = True
+MASH_BITS = (0x0010, 0x0020, 0x0040, 0x0080, 0x1000, 0x2000, 0x4000, 0x8000, 0x0400, 0x0800)
+
+
+def pacote20(in0, in1, h2, frame):
+    return struct.pack("<HHHHHHHHI", in0 & 0xffff, 0, in1 & 0xffff, 0, h2 & 0xffff, 0, frame & 0x3f, 0, 0)
+
+
+def modem_link(conn, addr):
+    ip = addr[0]
+    out("[MODEM] === PS2 %s ligou o modem virtual (porta %d) ===" % (ip, P2P_PORT))
+    conn.settimeout(1.0)
+    buf = b""
+    fase = "ping"            # ping -> sync -> bin
+    pings = 0
+    n_in = 0
+    bot_frame = 1            # o jogo espera o primeiro frame do oponente = 1
+    mash = {"bit": 0}
+    ultimo = time.time()
+    esperado = None
+    try:
+        while True:
+            try:
+                d = conn.recv(4096)
+            except socket.timeout:
+                if time.time() - ultimo > 90:
+                    out("[MODEM] sem dados ha 90 s, encerrando")
+                    break
+                continue
+            if not d:
+                break
+            ultimo = time.time()
+            if fase != "bin" or n_in < 4:
+                out("[MODEM] RX %d bytes: %s" % (len(d), d[:40].hex()))
+            buf += d
+            while True:
+                if fase in ("ping", "sync"):
+                    i = buf.find(b"\n")
+                    if i < 0:
+                        if len(buf) > 200:
+                            out("[MODEM] lixo sem fim de linha, descartando %d bytes" % len(buf)); buf = b""
+                        break
+                    linha = buf[:i].strip(b"\r\n\x00 ")
+                    buf = buf[i + 1:]
+                    if not linha:
+                        continue
+                    t = linha.decode("ascii", "replace")
+                    if t == "PING":
+                        pings += 1
+                        conn.sendall(b"PONG\n")
+                        if pings <= 2 or pings == 8:
+                            out("[MODEM] PING #%d -> PONG" % pings)
+                    elif t == "START" and fase == "ping":
+                        fase = "sync"
+                        out("[MODEM] START do PS2 (apos %d PINGs) -> sincronizacao" % pings)
+                    elif t == "READY":
+                        fase = "sync"
+                        conn.sendall(b"\nOK\n")
+                        out("[MODEM] READY -> OK")
+                    elif t == "START" and fase == "sync":
+                        fase = "bin"
+                        out("[MODEM] === START: LUTA COMECOU (pacotes binarios de 20 bytes) ===")
+                    else:
+                        out("[MODEM] linha inesperada: %r" % t)
+                else:
+                    if len(buf) < 20:
+                        break
+                    p = buf[:20]; buf = buf[20:]
+                    in0, _, in1, _, h2, _, fr, _, extra = struct.unpack("<HHHHHHHHI", p)
+                    n_in += 1
+                    if esperado is not None and (fr & 0x3f) != esperado:
+                        out("[MODEM] AVISO: frame %d recebido, esperava %d" % (fr, esperado))
+                    esperado = ((fr & 0x3f) + 1) & 0x3f
+                    if n_in <= 12 or n_in % 300 == 0:
+                        out("[MODEM] pacote #%d frame=%d in0=%04x in1=%04x h2=%04x extra=%08x raw=%s" % (n_in, fr, in0, in1, h2, extra, p.hex()))
+                    # entrada do BOT
+                    ph = n_in % 24
+                    if ph == 1:
+                        mash["bit"] = random.choice(MASH_BITS)
+                    bot_in = mash["bit"] if (P2P_MASH and ph < 4) else 0
+                    conn.sendall(pacote20(bot_in, 0, h2 & ~0x0010, bot_frame))
+                    bot_frame = (bot_frame + 1) & 0x3f
+    except (ConnectionError, OSError) as e:
+        out("[MODEM] conexao encerrada: %s" % e)
+    finally:
+        out("[MODEM] === link encerrado (fase=%s, pacotes do PS2=%d, PINGs=%d) ===" % (fase, n_in, pings))
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
+def modem_listener(port):
+    s = socket.socket()
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", port))
+    s.listen(5)
+    out("escutando TCP %d (modem virtual / luta contra o BOT)" % port)
+    while True:
+        c, a = s.accept()
+        threading.Thread(target=modem_link, args=(c, a), daemon=True).start()
+
+
 def tcp_listener(port, idle):
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -691,7 +826,11 @@ if __name__ == "__main__":
     ap.add_argument("--idle", type=int, default=120, help="segundos de silencio antes de encerrar")
     ap.add_argument("--sem-bot", action="store_true", help="nao simular oponente apos a busca")
     ap.add_argument("--nick-bot", default="BOT", help="ID/nick que o BOT mostra na tela VS (ate 17 bytes)")
+    ap.add_argument("--p2p-port", type=int, default=9877, help="porta TCP do modem virtual (luta contra o BOT)")
+    ap.add_argument("--sem-mash", action="store_true", help="BOT fica parado na luta (sem apertar botoes aleatorios)")
     a = ap.parse_args()
+    P2P_PORT = a.p2p_port
+    P2P_MASH = not a.sem_mash
     BOT = not a.sem_bot
     BOT_NICK = a.nick_bot.encode("cp932", "replace")[:17] or b"BOT"
     BOT_ID = (unicodedata.normalize("NFKC", a.nick_bot).encode("ascii", "ignore")[:8] or BOT_NICK[:8])
@@ -699,11 +838,12 @@ if __name__ == "__main__":
     for p in a.ports.split(","):
         threading.Thread(target=tcp_listener, args=(int(p), a.idle), daemon=True).start()
     threading.Thread(target=udp_logger, args=(a.logport,), daemon=True).start()
+    threading.Thread(target=modem_listener, args=(P2P_PORT,), daemon=True).start()
     if BOT:
         for bp in BOT_PORTAS:
             threading.Thread(target=peer_tcp, args=(bp,), daemon=True).start()
             threading.Thread(target=peer_udp, args=(bp,), daemon=True).start()
-    out("=== SERVIDOR VERSAO 23 (BOT + oponente P2P: handshake, canais, PONG 0x50, 'pronto' 0x30, espelho 0x20/0x70, BOT: %s) ===" % ("LIGADO" if BOT else "desligado"))
+    out("=== SERVIDOR VERSAO 26 (BOT + modem virtual porta %d: PING/PONG, READY/OK, pacotes de 20 bytes; BOT: %s) ===" % (P2P_PORT, "LIGADO" if BOT else "desligado"))
     out("IPs deste PC: " + ", ".join(local_ips()))
     out("pronto. Aguardando o PS2... (Ctrl+C para sair)")
     while True:
