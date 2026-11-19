@@ -42,13 +42,17 @@ jobs:
         if: always()
         shell: sh
         run: |
-          # v0.2 DIAGNOSTICO: o 1o modulo que o jogo le (AVETCP.IRX) vira o carregador de rede + AVEWRAP2,
-          # que agora atende TAMBEM o RPC do USB_SRCH e do ACC_COM e registra tudo em UDP.
+          # v0.3: AVETCP.IRX (1o modulo lido pelo jogo) vira o carregador de rede + AVEWRAP2
           cp iop/loader/loader.irx out/MODULES/AVETCP.IRX 2>/dev/null || true
-          # todo o resto vira modulo vazio
-          for n in AVEPPP AVE_WRAP CXTMDM OMMODEM OSTMDM_A USB_SRCH ACC_COM; do cp iop/empty/empty.irx out/MODULES/$n.IRX 2>/dev/null || true; done
+          # USB_SRCH e ACC_COM: stubs RESIDENTES que registram o RPC logo na carga
+          cp iop/usbsrch/usbsrch.irx out/MODULES/USB_SRCH.IRX 2>/dev/null || true
+          cp iop/acccom/acccom.irx   out/MODULES/ACC_COM.IRX  2>/dev/null || true
+          # o resto vira modulo vazio
+          for n in AVEPPP AVE_WRAP CXTMDM OMMODEM OSTMDM_A; do cp iop/empty/empty.irx out/MODULES/$n.IRX 2>/dev/null || true; done
           cp iop/avewrap/avewrap2.irx out/MODULES/AVEWRAP2.IRX 2>/dev/null || true
-          cp $PS2SDK/iop/irx/ps2dev9.irx out/MODULES/PS2DEV9.IRX 2>/dev/null || true
+          # IMPORTANTE: o jogo carrega o proprio DEV9.IRX (Sony, 2001) ja na inicializacao e ele nao serve para o Slim/SMAP.
+          # Trocamos o DEV9.IRX do disco pelo ps2dev9 do ps2sdk (o loader nao carrega mais PS2DEV9).
+          cp $PS2SDK/iop/irx/ps2dev9.irx out/MODULES/DEV9.IRX 2>/dev/null || true
           cp $PS2SDK/iop/irx/netman.irx  out/MODULES/NETMAN.IRX  2>/dev/null || true
           cp $PS2SDK/iop/irx/smap.irx    out/MODULES/SMAP.IRX    2>/dev/null || true
           if [ -f $PS2SDK/iop/irx/ps2ip-nm.irx ]; then cp $PS2SDK/iop/irx/ps2ip-nm.irx out/MODULES/PS2IP.IRX; else cp $PS2SDK/iop/irx/ps2ip.irx out/MODULES/PS2IP.IRX 2>/dev/null || true; fi
