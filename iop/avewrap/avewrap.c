@@ -24,7 +24,10 @@
 #include "irx_imports.h"
 #include "config.h"
 
-IRX_ID("Capcom_AVE_TCP_Wrapper", 1, 1);
+IRX_ID("Capcom_AVE_TCP_Wrapper", 1, 2);
+
+/* v0.2 (diagnostico): ESTE modulo agora tambem atende o RPC do USB_SRCH (0x01270010) e do ACC_COM (0x01270020),
+ * e e carregado ja no PRIMEIRO modulo que o jogo le (AVETCP.IRX), para registrar em UDP tudo o que o jogo faz. */
 
 #define AVE_RPC_ID 0x01270030
 #define RPCBUF_SZ  2048
@@ -35,9 +38,12 @@ IRX_ID("Capcom_AVE_TCP_Wrapper", 1, 1);
 #define IP4(a, b, c, d) ((u32)(a) | ((u32)(b) << 8) | ((u32)(c) << 16) | ((u32)(d) << 24))
 #define HTONS(x)        ((u16)((((x) & 0xff) << 8) | (((x) >> 8) & 0xff)))
 
-static SifRpcDataQueue_t g_qd;
-static SifRpcServerData_t g_sd;
-static u8 g_rpcbuf[RPCBUF_SZ] __attribute__((aligned(64)));
+#define NRPC 3
+static SifRpcDataQueue_t g_qds[NRPC];
+static SifRpcServerData_t g_sds[NRPC];
+static u8 g_bufs[NRPC][RPCBUF_SZ] __attribute__((aligned(64)));
+static const u32 g_ids[NRPC] = { 0x01270030, 0x01270010, 0x01270020 };
+static void *(*g_fn[NRPC])(int, void *, int);
 
 /* ---------- log (console do IOP + UDP para o PC) ---------- */
 static int g_logfd = -1;
@@ -47,9 +53,19 @@ static volatile int g_net_ready = 0;
 static volatile int g_found = 0;
 static volatile u32 g_cnt[80];
 
+#define EARLYN 40
+static char g_early[EARLYN][120];
+static volatile int g_early_n = 0;
+static volatile u32 g_cnt_usb[8], g_cnt_acc[16];
+
 static void logmsg(const char *m)
 {
     printf("%s", m);
+    if (g_logfd < 0 && g_early_n < EARLYN) {          /* rede ainda nao subiu: guarda para enviar depois */
+        strncpy(g_early[g_early_n], m, 119);
+        g_early[g_early_n][119] = 0;
+        g_early_n++;
+    }
     if (g_logfd >= 0) {
         if (!g_found)
             lwip_sendto(g_logfd, (void *)m, strlen(m), 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
@@ -282,13 +298,42 @@ static void *rpc_dispatch(int cmd, void *data, int size)
     return data;
 }
 
+/* ---------- USB_SRCH (RPC 0x01270010): sempre "modem Conexant 0572:1272 encontrado" ---------- */
+static void *usb_dispatch(int cmd, void *data, int size)
+{
+    u32 *p = (u32 *)data;
+    int c = (cmd >= 0 && cmd < 8) ? cmd : 7;
+    g_cnt_usb[c]++;
+    if (g_cnt_usb[c] <= 3) LOG("USB_SRCH cmd %d (chamada %d)\n", cmd, (int)g_cnt_usb[c]);
+    switch (cmd) {
+    case 2: p[0] = 1; break;
+    case 3: p[0] = 0x0572; p[1] = 0x1272; break;
+    case 5: p[0] = 1; p[1] = 0x0572; p[2] = 0x1272; break;
+    case 6: p[0] = 0; break;
+    default: break;
+    }
+    return data;
+}
+
+/* ---------- ACC_COM (RPC 0x01270020): API serial; responde 0 (primeira palavra) a tudo ---------- */
+static void *acc_dispatch(int cmd, void *data, int size)
+{
+    u32 *p = (u32 *)data;
+    int c = (cmd >= 0 && cmd < 16) ? cmd : 15;
+    g_cnt_acc[c]++;
+    if (g_cnt_acc[c] <= 3) LOG("ACC_COM cmd %d (chamada %d)\n", cmd, (int)g_cnt_acc[c]);
+    p[0] = 0;
+    return data;
+}
+
 /* ---------- threads ---------- */
 static void rpc_thread(void *arg)
 {
+    int i = (int)arg;
     sceSifInitRpc(0);
-    sceSifSetRpcQueue(&g_qd, GetThreadId());
-    sceSifRegisterRpc(&g_sd, AVE_RPC_ID, rpc_dispatch, g_rpcbuf, NULL, NULL, &g_qd);
-    sceSifRpcLoop(&g_qd);
+    sceSifSetRpcQueue(&g_qds[i], GetThreadId());
+    sceSifRegisterRpc(&g_sds[i], g_ids[i], g_fn[i], g_bufs[i], NULL, NULL, &g_qds[i]);
+    sceSifRpcLoop(&g_qds[i]);
 }
 
 /* DHCP + log/heartbeat por UDP + descoberta automatica do servidor no PC */
@@ -313,6 +358,9 @@ static void net_thread(void *arg)
     g_logfd = lwip_socket(AF_INET, SOCK_DGRAM, 0);
     lwip_setsockopt(g_logfd, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on));
     set_nonblock(g_logfd);
+    for (i = 0; i < g_early_n; i++)                      /* logs de antes da rede subir */
+        lwip_sendto(g_logfd, g_early[i], strlen(g_early[i]), 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
+    logmsg("[avewrap] === rede no ar (v0.2 diagnostico) ===\n");
 
     for (;;) {
         u32 a = 0;
@@ -326,6 +374,11 @@ static void net_thread(void *arg)
         sprintf(msg, "[avewrap] cnt: open=%d stat=%d send=%d recv=%d pppStart=%d pppSt=%d dnsTk=%d dnsLk=%d outros=%d\n",
                 (int)g_cnt[7], (int)g_cnt[14], (int)g_cnt[15], (int)g_cnt[18], (int)g_cnt[33],
                 (int)g_cnt[35], (int)g_cnt[58], (int)g_cnt[60], (int)(g_cnt[3] + g_cnt[4] + g_cnt[11] + g_cnt[59]));
+        logmsg(msg);
+        sprintf(msg, "[avewrap] usb: c1=%d c2=%d c3=%d c4=%d c5=%d | acc: c1=%d c2=%d c3=%d c4=%d c5=%d c6=%d c7=%d c8=%d\n",
+                (int)g_cnt_usb[1], (int)g_cnt_usb[2], (int)g_cnt_usb[3], (int)g_cnt_usb[4], (int)g_cnt_usb[5],
+                (int)g_cnt_acc[1], (int)g_cnt_acc[2], (int)g_cnt_acc[3], (int)g_cnt_acc[4], (int)g_cnt_acc[5],
+                (int)g_cnt_acc[6], (int)g_cnt_acc[7], (int)g_cnt_acc[8]);
         logmsg(msg);
         lwip_sendto(g_logfd, (void *)"CVS2-DISCOVER", 13, 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
         fromlen = sizeof(from);
@@ -347,10 +400,14 @@ int _start(int argc, char *argv[])
     memset(&g_srvlog, 0, sizeof(g_srvlog));
     g_srvlog.sin_family = AF_INET; g_srvlog.sin_port = HTONS(LOG_PORT);
 
-    th.attr = TH_C; th.option = 0; th.thread = rpc_thread; th.stacksize = 0x4000; th.priority = 0x28;
-    tid = CreateThread(&th);
-    if (tid <= 0) return MODULE_NO_RESIDENT_END;
-    StartThread(tid, NULL);
+    g_fn[0] = rpc_dispatch; g_fn[1] = usb_dispatch; g_fn[2] = acc_dispatch;
+    for (i = 0; i < NRPC; i++) {
+        th.attr = TH_C; th.option = 0; th.thread = rpc_thread; th.stacksize = 0x4000; th.priority = 0x28;
+        tid = CreateThread(&th);
+        if (tid <= 0) return MODULE_NO_RESIDENT_END;
+        StartThread(tid, (void *)i);
+    }
+    LOG("modulo iniciado: RPC AVE_WRAP + USB_SRCH + ACC_COM registrados\n");
 
     th.thread = net_thread; th.priority = 0x30;
     tid = CreateThread(&th);

@@ -1,4 +1,4 @@
-/* Substitui CXTMDM.IRX / OSTMDM_A.IRX / OMMODEM.IRX (CvS2): em vez de driver de modem,
+/* v0.2: entra no lugar do AVETCP.IRX (1o modulo lido pelo jogo). Sobe a pilha de rede Ethernet e o AVEWRAP2.
    carrega a pilha de rede Ethernet e o substituto do AVE_WRAP. */
 #include "irx_imports.h"
 
