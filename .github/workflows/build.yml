@@ -42,14 +42,12 @@ jobs:
         if: always()
         shell: sh
         run: |
-          # drivers de modem (CXTMDM = Conexant, OMMODEM = Omron, OSTMDM_A = outro) -> carregador de rede
-          for n in CXTMDM OMMODEM OSTMDM_A; do cp iop/loader/loader.irx out/MODULES/$n.IRX 2>/dev/null || true; done
-          # PPP/TCP originais -> modulo vazio
-          for n in AVEPPP AVE_WRAP AVETCP; do cp iop/empty/empty.irx out/MODULES/$n.IRX 2>/dev/null || true; done
-          # ACC_COM (API serial): o stub entra com o mesmo nome, carregado pelo proprio jogo na ordem certa
-          cp iop/acccom/acccom.irx out/MODULES/ACC_COM.IRX 2>/dev/null || true
+          # v0.2 DIAGNOSTICO: o 1o modulo que o jogo le (AVETCP.IRX) vira o carregador de rede + AVEWRAP2,
+          # que agora atende TAMBEM o RPC do USB_SRCH e do ACC_COM e registra tudo em UDP.
+          cp iop/loader/loader.irx out/MODULES/AVETCP.IRX 2>/dev/null || true
+          # todo o resto vira modulo vazio
+          for n in AVEPPP AVE_WRAP CXTMDM OMMODEM OSTMDM_A USB_SRCH ACC_COM; do cp iop/empty/empty.irx out/MODULES/$n.IRX 2>/dev/null || true; done
           cp iop/avewrap/avewrap2.irx out/MODULES/AVEWRAP2.IRX 2>/dev/null || true
-          cp iop/usbsrch/usbsrch.irx out/MODULES/USB_SRCH.IRX 2>/dev/null || true
           cp $PS2SDK/iop/irx/ps2dev9.irx out/MODULES/PS2DEV9.IRX 2>/dev/null || true
           cp $PS2SDK/iop/irx/netman.irx  out/MODULES/NETMAN.IRX  2>/dev/null || true
           cp $PS2SDK/iop/irx/smap.irx    out/MODULES/SMAP.IRX    2>/dev/null || true
