@@ -24,10 +24,11 @@
 #include "irx_imports.h"
 #include "config.h"
 
-IRX_ID("Capcom_AVE_TCP_Wrapper", 1, 2);
+IRX_ID("Capcom_AVE_TCP_Wrapper", 1, 3);
 
-/* v0.2 (diagnostico): ESTE modulo agora tambem atende o RPC do USB_SRCH (0x01270010) e do ACC_COM (0x01270020),
- * e e carregado ja no PRIMEIRO modulo que o jogo le (AVETCP.IRX), para registrar em UDP tudo o que o jogo faz. */
+/* v0.3: carregado no lugar do AVETCP.IRX (1o modulo lido pelo jogo) para a rede/log subirem cedo.
+ * Atende so o RPC do AVE_WRAP (0x01270030). USB_SRCH e ACC_COM voltam a ser modulos proprios e RESIDENTES,
+ * porque o jogo faz o bind deles logo apos a carga (e carga de modulo nao-residente em USB_SRCH da "Can't load module"). */
 
 #define AVE_RPC_ID 0x01270030
 #define RPCBUF_SZ  2048
@@ -360,7 +361,7 @@ static void net_thread(void *arg)
     set_nonblock(g_logfd);
     for (i = 0; i < g_early_n; i++)                      /* logs de antes da rede subir */
         lwip_sendto(g_logfd, g_early[i], strlen(g_early[i]), 0, (struct sockaddr *)&g_bcast, sizeof(g_bcast));
-    logmsg("[avewrap] === rede no ar (v0.2 diagnostico) ===\n");
+    logmsg("[avewrap] === rede no ar (v0.3) ===\n");
 
     for (;;) {
         u32 a = 0;
@@ -401,13 +402,13 @@ int _start(int argc, char *argv[])
     g_srvlog.sin_family = AF_INET; g_srvlog.sin_port = HTONS(LOG_PORT);
 
     g_fn[0] = rpc_dispatch; g_fn[1] = usb_dispatch; g_fn[2] = acc_dispatch;
-    for (i = 0; i < NRPC; i++) {
+    for (i = 0; i < 1; i++) {      /* so o AVE_WRAP (indice 0) */
         th.attr = TH_C; th.option = 0; th.thread = rpc_thread; th.stacksize = 0x4000; th.priority = 0x28;
         tid = CreateThread(&th);
         if (tid <= 0) return MODULE_NO_RESIDENT_END;
         StartThread(tid, (void *)i);
     }
-    LOG("modulo iniciado: RPC AVE_WRAP + USB_SRCH + ACC_COM registrados\n");
+    LOG("modulo iniciado: RPC AVE_WRAP registrado (v0.3)\n");
 
     th.thread = net_thread; th.priority = 0x30;
     tid = CreateThread(&th);

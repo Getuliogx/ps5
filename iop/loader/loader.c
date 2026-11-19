@@ -5,7 +5,6 @@
 IRX_ID("AVE_NetLoader", 1, 1);
 
 static const char *mods[] = {
-    "cdrom0:\\MODULES\\PS2DEV9.IRX;1",
     "cdrom0:\\MODULES\\NETMAN.IRX;1",
     "cdrom0:\\MODULES\\SMAP.IRX;1",
     "cdrom0:\\MODULES\\PS2IP.IRX;1",
