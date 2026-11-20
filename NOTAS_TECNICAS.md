@@ -46,3 +46,13 @@ fase 0 `modem_module_initialize` (carrega AVETCP/USB_SRCH, bind RPC, busca modem
   Em lockstep: o frame do oponente tem que ser exatamente o esperado ou o jogo marca erro de sincronia (gp-22460). Janela de atraso ~ (0x4a1... + 2) frames.
   match_IO_get (0x19cc00) calcula bordas de subida/descida (entradas ativas em 1).
 - O contador `usb:`/`acc:` do heartbeat da v0.3 era dos despachantes NAO registrados do avewrap (sempre 0): nao provava nada.
+
+## Jogador x jogador (v0.5)
+- Quem ATENDE (gp-22544 = 2): `modem_connect_20` pula o ATDT e le so os "OK" do script; `modem_connect_30` espera a linha "RING"
+  (0x3d0848), responde "ATA\r\n" (0x3d0850) e espera "CONNECT" (mesmo estado do chamador; timeout de 3600 quadros). Depois `modem_connect_60`:
+  responde "PONG\n" a cada "PING" e espera "START".
+- O servidor decide o lado no 6902 (1 = disca, 2 = atende). So o lado 1 pede o 6906; o string do 6906 vira "ATDT3333,<string>" (o jogo
+  acrescenta o prefixo "3333,"): o servidor usa o codigo da partida (7NNNNN) como numero; "0000" = BOT.
+- Pareamento do link do atendente: por IP de origem igual ao da sessao de lobby dele (ou, se so existir um candidato, depois de 15 s).
+  O chamador espera ate 50 s o modem do outro lado ligar; o atendente tem 25 s para responder ATA.
+- Ponte: duas threads repassam bytes; qualquer lado fechando derruba o par. A luta so precisa de latencia baixa (lockstep de 60 pacotes/s).
