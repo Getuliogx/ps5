@@ -1,3 +1,4 @@
+
 #ifndef CONFIG_H
 #define CONFIG_H
 /* >>> EDITE AQUI: IP do servidor <<<
@@ -10,9 +11,9 @@
 #define SERVER_IP_C 193
 #define SERVER_IP_D 29
 /* Porta TCP do servidor. 0 = usar a porta que o proprio jogo pedir. */
-#define SERVER_PORT 0
+#define SERVER_PORT 19876
 /* Porta UDP para onde o PS2 manda os logs (o servidor do PC escuta nela). */
-#define LOG_PORT 9999
+#define LOG_PORT 19999
 /* Porta TCP do "modem virtual" (link com o oponente/BOT no PC). O jogo disca ATDT e o AVEWRAP2 conecta aqui. */
-#define P2P_PORT 9877
+#define P2P_PORT 19877
 #endif
